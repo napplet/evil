@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-01-sandbox-escape",
+  "title": "evil-01 sandbox escape",
+  "description": "Red-team napplet: NIP-5D baseline sandbox-escape probes. Demo by default; VERY EVIL mode executes real payloads only after a stern typed confirmation."
+}

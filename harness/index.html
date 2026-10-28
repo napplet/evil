@@ -15,20 +15,26 @@
   label { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
   button { background: #1f1b29; border: 1px solid #2e2940; color: #e9e6f2; border-radius: 6px; font: inherit; padding: 4px 12px; cursor: pointer; }
   button:hover { border-color: #ff5470; color: #ff5470; }
+  select { background: #1f1b29; border: 1px solid #2e2940; color: #e9e6f2; border-radius: 6px; font: inherit; padding: 3px 6px; }
   #meta { padding: 6px 12px; border-bottom: 1px solid #2e2940; color: #8d88a3; font-size: 11px; overflow-wrap: anywhere; }
-  #stage { display: grid; grid-template-columns: 1fr 260px; gap: 8px; padding: 10px 12px; }
+  #stage { display: grid; grid-template-columns: 1fr 300px; gap: 8px; padding: 10px 12px; }
   iframe { width: 100%; border: 1px solid #2e2940; border-radius: 6px; background: #0d0b12; }
-  #frame { height: 70vh; }
-  #sibling { height: 120px; }
-  #msgs { border: 1px solid #2e2940; border-radius: 6px; background: #0d0b12; padding: 6px; height: 70vh; overflow: auto; font-size: 11px; color: #8d88a3; white-space: pre-wrap; user-select: text; }
+  #frame { height: 66vh; }
+  #sibling { height: 100px; }
+  .panel { border: 1px solid #2e2940; border-radius: 6px; padding: 6px; }
+  #msgs { background: #0d0b12; padding: 6px; height: 50vh; overflow: auto; font-size: 11px; color: #8d88a3; white-space: pre-wrap; user-select: text; }
   #msgs b { color: #ff5470; }
+  #msgs .ok { color: #3fd68f; }
+  #launcherCard { background: #0d0b12; border: 1px solid #2e2940; border-radius: 6px; padding: 8px; font-size: 12px; margin-bottom: 8px; min-height: 16px; }
+  #launcherCard .l-label { color: #8d88a3; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; display: block; margin-bottom: 4px; }
+  #store { background: #0d0b12; padding: 6px; max-height: 20vh; overflow: auto; font-size: 10px; color: #8d88a3; white-space: pre-wrap; user-select: text; }
   .note { color: #ffb454; font-size: 11px; }
 </style>
 </head>
 <body>
 <header>
   <h1>evil-napplets harness</h1>
-  <span class="note">deliberately misconfigurable victim shell — point presets at a napplet and watch what arms</span>
+  <span class="note">deliberately misconfigurable victim shell — arm knobs, load a napplet, watch what escapes</span>
 </header>
 <form id="controls">
   <fieldset>
@@ -44,21 +50,55 @@
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
   </fieldset>
   <fieldset>
+    <legend>fake NAP runtime (window.napplet.storage)</legend>
+    <label><input type="checkbox" name="runtime"> inject storage domain</label>
+    <label>ns policy
+      <select name="policy">
+        <option value="by-dtag-hash" selected>by-(dTag+hash) — spec-safe</option>
+        <option value="by-dtag">by-dTag — version substitution leaks</option>
+        <option value="global">global — everything shared</option>
+      </select>
+    </label>
+    <label><input type="checkbox" name="trustdeclared"> trust DECLARED identity fields (sloppy router)</label>
+  </fieldset>
+  <fieldset>
+    <legend>launcher (manifest metadata render)</legend>
+    <label><input type="radio" name="launcher" value="safe" checked> safe — textContent</label>
+    <label><input type="radio" name="launcher" value="unsafe"> unsafe — innerHTML (XSS)</label>
+  </fieldset>
+  <fieldset>
     <legend>napplet</legend>
     <select id="nappletSel">
-      <option value="evil-01-sandbox-escape" selected>evil-01-sandbox-escape</option>
+      <option value="evil-01-sandbox-escape">evil-01 sandbox escape</option>
+      <option value="evil-02-csp-egress">evil-02 CSP &amp; egress</option>
+      <option value="evil-03-transport-forge">evil-03 transport forge</option>
+      <option value="evil-04-manifest-confusion">evil-04 manifest confusion</option>
+      <option value="evil-05-substitution">evil-05 substitution</option>
+      <option value="evil-06-side-channels">evil-06 side channels</option>
+      <option value="evil-07-fingerprint">evil-07 fingerprint</option>
+      <option value="evil-08-wasm-timing">evil-08 wasm timing</option>
     </select>
     <button type="button" id="loadBtn">load napplet</button>
-    <button type="button" id="armBtn">re-run without reload</button>
   </fieldset>
 </form>
 <div id="meta">not loaded</div>
 <div id="stage">
-  <div><iframe id="frame" title="napplet under test"></iframe></div>
-  <div id="siblingCol">
-    <div id="msgs">messages from the napplet (source-checked):</div>
+  <div>
+    <iframe id="frame" title="napplet under test"></iframe>
+  </div>
+  <div>
+    <div id="launcherCol">
+      <div id="launcherCard"><span class="l-label">launcher card (manifest metadata render)</span>(empty)</div>
+    </div>
+    <div id="siblingCol"></div>
+    <div id="msgs">messages (source-checked):</div>
   </div>
 </div>
+<details style="margin: 0 12px 12px;">
+  <summary style="color:#8d88a3; cursor:pointer;">fake runtime store (namespaces)</summary>
+  <div id="store">not loaded</div>
+</details>
+
 <script>
 'use strict';
 (function () {
@@ -67,57 +107,195 @@
   const meta = document.getElementById('meta');
   const msgs = document.getElementById('msgs');
   const nappletSel = document.getElementById('nappletSel');
+  const launcherCard = document.getElementById('launcherCard');
+  const storeEl = document.getElementById('store');
 
   const CSP_BASELINE = 'default-src \'none\'; script-src \'unsafe-inline\' \'wasm-unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:; font-src data:; connect-src \'none\'; worker-src \'none\'; child-src \'none\'; frame-src \'none\'; media-src \'none\'; object-src \'none\'; manifest-src \'none\'; base-uri \'none\'; form-action \'none\'';
 
-  /* canary data in shell storage — for watching evil-01's storage theft find it */
+  let store = {};
+  window.__evilStore = () => store;
+  window.__evilLogLines = [];
+  function dumpStore() {
+    storeEl.textContent = JSON.stringify(store, null, 2);
+  }
+  function log(line) {
+    window.__evilLogLines.push(line);
+    msgs.textContent += line + '\n';
+    msgs.scrollTop = msgs.scrollHeight;
+  }
+
+  /* canary data in shell storage — evil-01's storage theft should find it */
   localStorage.setItem('__harness_canary_nsec__', 'nsec1fake_redteam_canary_this_is_not_a_real_key');
   localStorage.setItem('__harness_canary_session__', 'session-token-fake-redteam-canary');
   sessionStorage.setItem('__harness_canary__', 'redteam');
 
-  /* fake NIP-07 extension on the shell (a real browser extension would inject
-     into every frame, all_frames: true — this simulates the shell-owned one) */
+  /* fake NIP-07 extension on the shell (simulates the shell-owned one) */
   const FAKE_PK = '3d0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f50617';
   window.nostr = {
     async getPublicKey() { return FAKE_PK; },
     async signEvent(ev) {
       const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n / 2))).map((b) => b.toString(16).padStart(2, '0')).join('');
-      const signed = Object.assign({ pubkey: FAKE_PK, id: rand(64), sig: rand(128) }, ev);
-      return signed;
+      return Object.assign({ pubkey: FAKE_PK, id: rand(64), sig: rand(128) }, ev);
     },
-    async nip04_encrypt() { throw new Error('not implemented (harness fake)'); },
-    async nip04_decrypt() { throw new Error('not implemented (harness fake)'); },
   };
 
   async function sha256Hex(text) {
-    const bytes = new TextEncoder().encode(text);
-    const buf = await crypto.subtle.digest('SHA-256', bytes);
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
-  function injectCsp(artifact) {
-    const metaTag = '<meta http-equiv="Content-Security-Policy" content="' + CSP_BASELINE.replace(/"/g, '&quot;') + '">';
-    if (/<head[^>]*>/i.test(artifact)) return artifact.replace(/<head[^>]*>/i, (m) => m + metaTag);
-    return artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + metaTag + '</head>');
+  /* Minimal NAP-STORAGE shim: injected into the artifact's head BEFORE any
+     napplet script runs, and OUTSIDE the bytes used for artifactHash — the
+     pattern NIP-5D requires of a real runtime. */
+  const RUNTIME_SHIM = [
+    '<script>(function () {',
+    '  var pending = new Map();',
+    '  window.addEventListener("message", function (e) {',
+    '    var d = e.data; if (d && d.id && pending.has(d.id)) { var p = pending.get(d.id); pending.delete(d.id); p(d); }',
+    '  });',
+    '  function req(type, payload) {',
+    '    return new Promise(function (resolve) {',
+    '      var id = "nap-" + Math.random().toString(16).slice(2);',
+    '      pending.set(id, resolve);',
+    '      window.parent.postMessage(Object.assign({ type: type, id: id }, payload || {}), "*");',
+    '      setTimeout(function () { if (pending.has(id)) { pending.delete(id); resolve({ error: "timeout" }); } }, 5000);',
+    '    });',
+    '  }',
+    '  function ok(r) { if (r && r.error) throw new Error(r.error); return r; }',
+    '  window.napplet = { storage: {',
+    '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
+    '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
+    '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+    '  } };',
+    '})();<\/script>',
+  ].join('\n');
+
+  function knownWindow(source) {
+    if (source === frame.contentWindow) return frame;
+    const sibs = document.querySelectorAll('#siblingCol iframe');
+    for (const s of sibs) if (source === s.contentWindow) return s;
+    return null;
   }
+
+  function nsFor(frameEl, msg, policy, trustDeclared) {
+    const d = frameEl.dataset.dTag;
+    const h = frameEl.dataset.artifactHash;
+    if (trustDeclared && (msg.windowId || msg.dTag)) return 'd:' + (msg.dTag || msg.windowId); // the sloppy shortcut
+    if (policy === 'global') return 'global';
+    if (policy === 'by-dtag') return 'd:' + d;
+    return 'dh:' + d + ':' + h;
+  }
+
+  function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  async function handleStorage(msg, frameEl, source) {
+    const policy = new FormData(controls).get('policy');
+    const trustDeclared = new FormData(controls).get('trustdeclared') === 'on';
+    const ns = nsFor(frameEl, msg, policy, trustDeclared);
+    if (!store[ns]) store[ns] = {};
+    const nsStore = store[ns];
+    const reply = (payload) => source.postMessage(Object.assign({ type: msg.type + '.result', id: msg.id }, payload), '*');
+    if (msg.type === 'storage.get') {
+      const hit = Object.prototype.hasOwnProperty.call(nsStore, msg.key);
+      await delay(hit ? 40 : 6); // hit/miss latency difference: evil-06's oracle backend
+      if (hit) reply({ value: nsStore[msg.key] });
+      else reply({ error: 'no such key' });
+    } else if (msg.type === 'storage.set') {
+      const size = typeof msg.value === 'string' ? msg.value.length : 999999999;
+      if (size > 512 * 1024) { reply({ error: 'value too large (>512KB)' }); }
+      else { await delay(8); nsStore[msg.key] = msg.value; reply({ value: true }); }
+    } else if (msg.type === 'storage.remove') {
+      await delay(8);
+      delete nsStore[msg.key];
+      reply({ value: true });
+    } else {
+      /* unrecognized storage.* type: silently ignored per NIP-5D */ 
+    }
+    dumpStore();
+  }
+
+  function renderLauncher(manifest) {
+    const mode = new FormData(controls).get('launcher');
+    const title = String(manifest && manifest.title || '');
+    const content = String(manifest && manifest.content || '');
+    if (mode === 'unsafe') {
+      // THE BUG: manifest metadata rendered as HTML in the shell origin.
+      // NIP-5D: content "MUST be treated as plain text, not HTML or Markdown".
+      launcherCard.innerHTML = '<span class="l-label">launcher card (manifest metadata render)</span><b>' + title + '</b><p>' + content + '</p>';
+      log('[launcher] rendered manifest metadata via innerHTML (UNSAFE): ' + title.slice(0, 60));
+    } else {
+      launcherCard.textContent = '';
+      const label = document.createElement('span');
+      label.className = 'l-label';
+      label.textContent = 'launcher card (manifest metadata render)';
+      const b = document.createElement('b');
+      b.textContent = title;
+      const p = document.createElement('p');
+      p.textContent = content;
+      launcherCard.append(label, b, p);
+      log('[launcher] rendered manifest metadata as text (safe): ' + title.slice(0, 60));
+    }
+  }
+
+  window.addEventListener('message', (e) => {
+    const d = e.data;
+    if (!d || typeof d.type !== 'string') return;
+    const frameEl = knownWindow(e.source);
+    if (!frameEl) {
+      log('DROPPED message from UNKNOWN source: ' + JSON.stringify(d).slice(0, 140));
+      return;
+    }
+    if (d.type === 'evil.ping') {
+      // echo with a shell-side wall clock so the frame can measure shell starvation
+      e.source.postMessage({ type: 'evil.pong', id: d.id, shellEchoedAt: Date.now() }, '*');
+      return;
+    }
+    if (d.type === 'evil.launcher.manifest') {
+      renderLauncher(d.manifest);
+      return;
+    }
+    if (d.type.indexOf('storage.') === 0) {
+      if (frameEl.dataset.runtime !== '1') {
+        log('DROPPED storage.* from frame with NO runtime domain: ' + JSON.stringify(d).slice(0, 120));
+        return;
+      }
+      log('ACCEPTED ' + JSON.stringify(d).slice(0, 120));
+      void handleStorage(d, frameEl, e.source);
+      return;
+    }
+    // Unrecognized types are silently ignored (NIP-5D forward compatibility)
+  });
 
   async function load() {
     const f = new FormData(controls);
     const preset = f.get('preset');
     const cspOn = f.get('csp') === 'on';
     const nostrOn = f.get('nostr') === 'on';
-    const siblingOn = f.get('sibling') === 'on';
+    const runtimeOn = f.get('runtime') === 'on';
+    const policy = f.get('policy');
     const napplet = nappletSel.value;
 
     const res = await fetch('../napplets/' + napplet + '/index.html');
     const raw = await res.text();
     const hash = await sha256Hex(raw);
-    const artifact = cspOn ? injectCsp(raw) : raw;
+    let artifact = raw;
+    if (cspOn) {
+      const cspMeta = '<meta http-equiv="Content-Security-Policy" content="' + CSP_BASELINE.replace(/"/g, '&quot;') + '">';
+      artifact = /<head[^>]*>/i.test(artifact)
+        ? artifact.replace(/<head[^>]*>/i, (m) => m + cspMeta)
+        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + cspMeta + '</head>');
+    }
+    if (runtimeOn) {
+      artifact = /<head[^>]*>/i.test(artifact)
+        ? artifact.replace(/<head[^>]*>/i, (m) => m + RUNTIME_SHIM)
+        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + RUNTIME_SHIM + '</head>');
+    }
 
     /* shell-side identity: map the iframe Window to (dTag, artifactHash) —
        computed from the verified bytes, never accepted from the napplet */
     frame.dataset.dTag = napplet;
     frame.dataset.artifactHash = hash;
+    frame.dataset.runtime = runtimeOn ? '1' : '0';
 
     if (preset === 'spec') frame.setAttribute('sandbox', 'allow-scripts');
     else if (preset === 'same-origin') frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
@@ -125,39 +303,52 @@
 
     frame.srcdoc = artifact;
 
-    if (nostrOn) window.nostr = window.nostr; else delete window.nostr;
+    if (!nostrOn) delete window.nostr;
 
-    if (siblingOn) {
-      const nf = document.createElement('iframe');
-      nf.id = 'sibling';
-      nf.title = 'sibling frame';
-      nf.style.height = '120px';
-      nf.srcdoc = '<!doctype html><title>sibling</title>';
-      document.getElementById('siblingCol').appendChild(nf);
+    /* sibling frame toggle */
+    document.querySelectorAll('#siblingCol iframe').forEach((s) => s.remove());
+    if (f.get('sibling') === 'on') {
+      const sib = document.createElement('iframe');
+      sib.id = 'sibling';
+      sib.title = 'sibling frame';
+      sib.style.height = '100px';
+      sib.dataset.dTag = 'sibling-napplet';
+      sib.dataset.artifactHash = '0'.repeat(64);
+      sib.setAttribute('sandbox', 'allow-scripts');
+      sib.srcdoc = '<!doctype html><title>sibling</title><style>body{margin:0;background:#0d0b12;color:#8d88a3;font:11px monospace;padding:6px;}</style>just a sibling frame';
+      document.getElementById('siblingCol').appendChild(sib);
     }
+
+    /* seeded namespaces — the victim\'s data for substitution / oracle probes.
+       Shapes: by-dTag ns, a by-(dTag+hash) ns under the v1 hash (≠ this
+       artifact's hash), and a global ns. Plus declared-identity traps. */
+    store = {};
+    const sel = napplet;
+    const secret = 'v1-victim-secret-INHERITED-BY-EVIL-05';
+    const seeds = {};
+    seeds['d:' + sel] = { '__evil05_secret__': secret, '__evil06_seeded__': 'present' };
+    seeds['dh:' + sel + ':v1hash00000000000000000000000000000000000000000000000000000000000'] = { '__evil05_secret__': secret, '__evil06_seeded__': 'present' };
+    seeds['global'] = { '__evil05_secret__': secret, '__evil06_seeded__': 'present', '__evil04_kit_xss__': 'xss-canary' };
+    seeds['d:evil-01-sandbox-escape'] = { '__evil03_spoof_trap__': 'ROUTED-BY-DECLARED-IDENTITY' };
+    seeds['d:evil-04-manifest-confusion'] = { '__evil04_kit_xss__': 'xss-canary' };
+    for (const [ns, kv] of Object.entries(seeds)) store[ns] = Object.assign({}, kv);
+    /* also seed a hit into the CURRENT frame's own resolved namespace, so the
+       timing-oracle probe measures a real hit under every policy */
+    const ownNs = policy === 'global' ? 'global' : policy === 'by-dtag' ? 'd:' + sel : 'dh:' + sel + ':' + hash;
+    if (!store[ownNs]) store[ownNs] = {};
+    store[ownNs]['__evil06_seeded__'] = 'present';
+    dumpStore();
 
     meta.textContent =
       'preset: ' + preset +
       ' · csp meta: ' + (cspOn ? 'injected' : 'omitted') +
       ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
-      ' · artifact sha256 (x tag): ' + hash +
+      ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
+      ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
   }
 
-  /* spec-compliant source check: only the mapped Window may talk */
-  window.addEventListener('message', (e) => {
-    const sib = document.getElementById('sibling');
-    const fromFrame = e.source && e.source === frame.contentWindow;
-    const fromSibling = sib && e.source === sib.contentWindow;
-    if (!fromFrame && !fromSibling) {
-      msgs.innerHTML += '<b>DROPPED</b> message from unknown source\n';
-      return;
-    }
-    msgs.innerHTML += (fromSibling ? '[sibling] ' : '') + JSON.stringify(e.data) + '\n';
-  });
-
   document.getElementById('loadBtn').addEventListener('click', () => { void load(); });
-  document.getElementById('armBtn').addEventListener('click', () => { void load(); });
   void load();
 })();
 </script>

@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-03-transport-forge",
+  "title": "evil-03 envelope forging & reply injection",
+  "description": "Red-team napplet: NIP-5D postMessage transport attacks — forged reply envelopes, declared-identity spoofing, sequential-id injection, unknown-source relays."
+}

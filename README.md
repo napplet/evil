@@ -44,8 +44,14 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-08` |
 
-`napplets/<id>/index.html` — each is a self-contained single-file NIP-5D artifact you
-can `srcdoc` into **any** runtime, or into the included victim harness.
+**All eight rungs are built and validated** — 71 automated checks against real
+Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
+and validated findings live in [ROADMAP.md](ROADMAP.md).
+
+Each rung is a self-contained single-file NIP-5D artifact
+(`napplets/<id>/index.html`) you can `srcdoc` into **any** runtime, or into the
+included victim harness. Artifacts are built from `src/` (shared chrome +
+per-napplet attack definitions) via `node build.mjs`.
 
 ## Running locally
 
@@ -54,22 +60,45 @@ python3 -m http.server 8787          # from the repo root
 # open http://localhost:8787/harness/
 ```
 
-The [harness](harness/index.html) is a deliberately misconfigurable victim shell:
+The [harness](harness/index.html) is a deliberately misconfigurable victim shell —
+every knob re-arms a different subset of the attacks:
 
-- **spec** — spec-compliant runtime (`sandbox="allow-scripts"`, CSP injected,
-  source-checked messages). All evil-01 probes should report **blocked**.
-- **sloppy** presets — `allow-same-origin`, missing sandbox attr, missing CSP,
-  shell `window.nostr` — each preset re-arms different subsets of the attacks,
-  which is exactly what you want your runtime's CI to run against.
+- **runtime preset** — `spec` (`sandbox="allow-scripts"` + CSP), `same-origin`
+  (+`allow-same-origin`), `no-sandbox` (no sandbox attr) — arms the evil-01
+  escape tree; `spec` is the green gate your runtime's CI should hold.
+- **CSP meta** — on/off. Off arms every evil-02 egress channel; on holds them
+  (except WebRTC — the spec gap, see ROADMAP).
+- **shell `window.nostr`** — a fake NIP-07 extension, arms ambient-signing probes.
+- **sibling iframe** — arms `parent.length` enumeration.
+- **fake NAP runtime** — injects a `window.napplet.storage` domain (pre-script,
+  outside the hashed artifact bytes, like a real runtime) with a selectable
+  **namespace policy**: `by-(dTag+hash)` (spec-safe), `by-dTag` (version
+  substitution leaks), or `global` (everything shared) — arms the evil-05
+  inheritance attacks, evil-06 oracles, and evil-03 router attacks.
+- **trust DECLARED identity** — a sloppy message router that trusts envelope
+  `windowId`/`dTag` fields over `MessageEvent.source` — arms the evil-03 spoof.
+- **launcher** — `safe` (textContent) vs `unsafe` (innerHTML) manifest-metadata
+  render — arms the evil-04 shell-origin XSS end to end.
+
+It also seeds victim canaries (`nsec` marker in `localStorage`, inherited v1
+  secrets per namespace policy), echoes `evil.ping` with a shell-side wall clock
+  (so frames can measure shell starvation), logs every ACCEPTED/DROPPED
+  message, and dumps the runtime store.
 
 ## Repo layout
 
 ```
+src/
+  chrome.template.html                # shared napplet chrome: probes UI, arm gate, report
+  napplets/<id>/{attacks.js,meta.json} # the ONLY per-napplet code
+build.mjs                             # assembles src → napplets/<id>/index.html
 napplets/
-  evil-01-sandbox-escape/index.html   # baseline escape probes + VERY EVIL payloads
+  <id>/index.html                     # built single-file NIP-5D artifacts (committed)
 harness/
-  index.html                          # configurable victim shell for local testing
-ROADMAP.md                            # attack ladder + candidate NIP-5D spec findings
+  index.html                          # configurable victim shell
+tests/
+  _helper.mjs + evil-0[1-8].spec.mjs   # 71 Playwright checks vs real Chromium
+ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 
 Evil napplets use their own dark palette (a red-team tool must stay legible even in a

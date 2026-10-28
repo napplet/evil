@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-04-manifest-confusion",
+  "title": "evil-04 manifest confusion",
+  "description": "Red-team napplet: NIP-5D manifest processing attacks — multi-x ambiguity, TOCTOU loading, launcher metadata XSS, plus a kit of crafted manifests for shell-side testing."
+}

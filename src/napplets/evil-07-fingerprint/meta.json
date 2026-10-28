@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-07-fingerprint",
+  "title": "evil-07 fingerprint & enumeration",
+  "description": "Red-team napplet: every identification surface that survives a fully spec-compliant NIP-5D runtime — hardware, GPU, fonts, devices, shell composition, referrer."
+}

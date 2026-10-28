@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-05-substitution",
+  "title": "evil-05 Nostr-level substitution",
+  "description": "Red-team napplet: unbound dTag resolution, replaceable rollback, and storage namespace squatting — a substituted napplet inherits its victim's stored data."
+}

@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-08-wasm-timing",
+  "title": "evil-08 wasm timing & same-process gadgets",
+  "description": "Red-team napplet: WebAssembly under the spec's own CSP baseline, timer resolution, and same-renderer-main-thread contention against the shell — the gadgets NIP-5D's wasm-unsafe-eval baseline assumes away."
+}

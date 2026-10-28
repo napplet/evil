@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-02-csp-egress",
+  "title": "evil-02 CSP & network egress",
+  "description": "Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC, which no CSP directive covers."
+}

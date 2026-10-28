@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-06-side-channels",
+  "title": "evil-06 side-channel oracles",
+  "description": "Red-team napplet: timing, quota, and error-taxonomy oracles on shell-mediated capabilities — key-existence, ACL boundary, and signer-backends readable from inside the sandbox."
+}
