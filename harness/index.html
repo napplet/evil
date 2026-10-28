@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-napplets harness — victim shell</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #15121b; color: #e9e6f2; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { padding: 10px 12px; border-bottom: 1px solid #2e2940; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  header h1 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .08em; color: #8d88a3; }
+  form { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #2e2940; }
+  fieldset { border: 1px solid #2e2940; border-radius: 6px; margin: 0; padding: 6px 10px; }
+  legend { padding: 0 6px; color: #8d88a3; font-size: 11px; }
+  label { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+  button { background: #1f1b29; border: 1px solid #2e2940; color: #e9e6f2; border-radius: 6px; font: inherit; padding: 4px 12px; cursor: pointer; }
+  button:hover { border-color: #ff5470; color: #ff5470; }
+  #meta { padding: 6px 12px; border-bottom: 1px solid #2e2940; color: #8d88a3; font-size: 11px; overflow-wrap: anywhere; }
+  #stage { display: grid; grid-template-columns: 1fr 260px; gap: 8px; padding: 10px 12px; }
+  iframe { width: 100%; border: 1px solid #2e2940; border-radius: 6px; background: #0d0b12; }
+  #frame { height: 70vh; }
+  #sibling { height: 120px; }
+  #msgs { border: 1px solid #2e2940; border-radius: 6px; background: #0d0b12; padding: 6px; height: 70vh; overflow: auto; font-size: 11px; color: #8d88a3; white-space: pre-wrap; user-select: text; }
+  #msgs b { color: #ff5470; }
+  .note { color: #ffb454; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>evil-napplets harness</h1>
+  <span class="note">deliberately misconfigurable victim shell — point presets at a napplet and watch what arms</span>
+</header>
+<form id="controls">
+  <fieldset>
+    <legend>runtime preset</legend>
+    <label><input type="radio" name="preset" value="spec" checked> spec — sandbox="allow-scripts" + CSP</label>
+    <label><input type="radio" name="preset" value="same-origin"> sloppy — +allow-same-origin</label>
+    <label><input type="radio" name="preset" value="no-sandbox"> worst — no sandbox attr</label>
+  </fieldset>
+  <fieldset>
+    <legend>shell surface</legend>
+    <label><input type="checkbox" name="csp" checked> inject CSP meta (spec baseline)</label>
+    <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
+    <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
+  </fieldset>
+  <fieldset>
+    <legend>napplet</legend>
+    <select id="nappletSel">
+      <option value="evil-01-sandbox-escape" selected>evil-01-sandbox-escape</option>
+    </select>
+    <button type="button" id="loadBtn">load napplet</button>
+    <button type="button" id="armBtn">re-run without reload</button>
+  </fieldset>
+</form>
+<div id="meta">not loaded</div>
+<div id="stage">
+  <div><iframe id="frame" title="napplet under test"></iframe></div>
+  <div id="siblingCol">
+    <div id="msgs">messages from the napplet (source-checked):</div>
+  </div>
+</div>
+<script>
+'use strict';
+(function () {
+  const controls = document.getElementById('controls');
+  const frame = document.getElementById('frame');
+  const meta = document.getElementById('meta');
+  const msgs = document.getElementById('msgs');
+  const nappletSel = document.getElementById('nappletSel');
+
+  const CSP_BASELINE = 'default-src \'none\'; script-src \'unsafe-inline\' \'wasm-unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:; font-src data:; connect-src \'none\'; worker-src \'none\'; child-src \'none\'; frame-src \'none\'; media-src \'none\'; object-src \'none\'; manifest-src \'none\'; base-uri \'none\'; form-action \'none\'';
+
+  /* canary data in shell storage — for watching evil-01's storage theft find it */
+  localStorage.setItem('__harness_canary_nsec__', 'nsec1fake_redteam_canary_this_is_not_a_real_key');
+  localStorage.setItem('__harness_canary_session__', 'session-token-fake-redteam-canary');
+  sessionStorage.setItem('__harness_canary__', 'redteam');
+
+  /* fake NIP-07 extension on the shell (a real browser extension would inject
+     into every frame, all_frames: true — this simulates the shell-owned one) */
+  const FAKE_PK = '3d0e4f3a5c61787b90a1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f50617';
+  window.nostr = {
+    async getPublicKey() { return FAKE_PK; },
+    async signEvent(ev) {
+      const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n / 2))).map((b) => b.toString(16).padStart(2, '0')).join('');
+      const signed = Object.assign({ pubkey: FAKE_PK, id: rand(64), sig: rand(128) }, ev);
+      return signed;
+    },
+    async nip04_encrypt() { throw new Error('not implemented (harness fake)'); },
+    async nip04_decrypt() { throw new Error('not implemented (harness fake)'); },
+  };
+
+  async function sha256Hex(text) {
+    const bytes = new TextEncoder().encode(text);
+    const buf = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function injectCsp(artifact) {
+    const metaTag = '<meta http-equiv="Content-Security-Policy" content="' + CSP_BASELINE.replace(/"/g, '&quot;') + '">';
+    if (/<head[^>]*>/i.test(artifact)) return artifact.replace(/<head[^>]*>/i, (m) => m + metaTag);
+    return artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + metaTag + '</head>');
+  }
+
+  async function load() {
+    const f = new FormData(controls);
+    const preset = f.get('preset');
+    const cspOn = f.get('csp') === 'on';
+    const nostrOn = f.get('nostr') === 'on';
+    const siblingOn = f.get('sibling') === 'on';
+    const napplet = nappletSel.value;
+
+    const res = await fetch('../napplets/' + napplet + '/index.html');
+    const raw = await res.text();
+    const hash = await sha256Hex(raw);
+    const artifact = cspOn ? injectCsp(raw) : raw;
+
+    /* shell-side identity: map the iframe Window to (dTag, artifactHash) —
+       computed from the verified bytes, never accepted from the napplet */
+    frame.dataset.dTag = napplet;
+    frame.dataset.artifactHash = hash;
+
+    if (preset === 'spec') frame.setAttribute('sandbox', 'allow-scripts');
+    else if (preset === 'same-origin') frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+    else frame.removeAttribute('sandbox');
+
+    frame.srcdoc = artifact;
+
+    if (nostrOn) window.nostr = window.nostr; else delete window.nostr;
+
+    if (siblingOn) {
+      const nf = document.createElement('iframe');
+      nf.id = 'sibling';
+      nf.title = 'sibling frame';
+      nf.style.height = '120px';
+      nf.srcdoc = '<!doctype html><title>sibling</title>';
+      document.getElementById('siblingCol').appendChild(nf);
+    }
+
+    meta.textContent =
+      'preset: ' + preset +
+      ' · csp meta: ' + (cspOn ? 'injected' : 'omitted') +
+      ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
+      ' · artifact sha256 (x tag): ' + hash +
+      ' · dTag: ' + napplet;
+  }
+
+  /* spec-compliant source check: only the mapped Window may talk */
+  window.addEventListener('message', (e) => {
+    const sib = document.getElementById('sibling');
+    const fromFrame = e.source && e.source === frame.contentWindow;
+    const fromSibling = sib && e.source === sib.contentWindow;
+    if (!fromFrame && !fromSibling) {
+      msgs.innerHTML += '<b>DROPPED</b> message from unknown source\n';
+      return;
+    }
+    msgs.innerHTML += (fromSibling ? '[sibling] ' : '') + JSON.stringify(e.data) + '\n';
+  });
+
+  document.getElementById('loadBtn').addEventListener('click', () => { void load(); });
+  document.getElementById('armBtn').addEventListener('click', () => { void load(); });
+  void load();
+})();
+</script>
+</body>
+</html>
