@@ -292,3 +292,54 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     through data:/blob: replacements. Fixed upstream by NIP-5D #14
     (per-document MessagePort binding + revoke-on-replacement); the harness
     `identity binding: port` knob is the regression gate.
+## Postmortem — why the ladder didn't find #11 first
+
+Finding #11 was fixed upstream (NIP-5D #14) before this suite had a rung for
+it. That is a ladder-design miss, and the near-misses are worth naming:
+
+- **evil-01 probed navigation only outward.** Attacks #6/#8 ask whether the
+  frame can hijack the *parent* or escape via popups. The one navigation that
+  broke the model — a frame navigating *itself* — was excluded by the ROE
+  itself ("no navigation" in demo mode), which treated navigation as an
+  outward weapon rather than an identity event.
+- **evil-03 validated the control and stopped.** It proved a compliant router
+  binds to `MessageEvent.source` and ignores declared identity — then asked
+  whether the envelope can lie, never what the *lifetime* of the source
+  binding is. The check wasn't wrong; the thing it pointed at (the Window)
+  outlived the document it was verified against.
+- **evil-04 was one question away.** The TOCTOU probe uses
+  `location.href === 'about:srcdoc'` as proof the running bytes are the
+  verified bytes — and never asked the inverse: what happens to my grants when
+  `location.href` changes? It treated document identity as a load-time
+  property to verify, not a runtime invariant to attack.
+- **evil-05 modeled substitution in the wrong direction.** The substituted
+  heir inherits the victim's data — but as a *different napplet loading where
+  the victim used to*, shell-side, pre-load. It never modeled the same frame
+  swapping documents *after* verification: substitution from inside, at
+  runtime.
+- **The findings taxonomy had no temporal category.** Findings were keyed to
+  clauses (unbound dTag, namespacing, WebRTC-vs-CSP). #11 is not a missing
+  rule — it is an unstated *temporal assumption* (Window↔document is 1:1 for
+  the life of the grant) that no rung existed to falsify.
+
+The methodology fix, applied from rung 10 on — every rung is selected against
+a **binding-lifetime checklist**. For every binding the spec establishes
+(identity→Window, CSP→document, grants→session, dTag→pubkey, …):
+
+1. What object is the binding keyed to?
+2. What is the lifetime of that key, and what events can replace one side of
+   the binding while the key persists (navigation, reload, `document.open`,
+   port transfer, version bump, re-resolution)?
+3. What invalidates the binding — and can the *bound party* trigger that
+   event deliberately?
+4. Which per-document controls silently expire, or persist, across the event?
+
+Run against pre-#14, this produces evil-09 on day one: key = the Window, event
+= self-navigation, invalidation = none in the text, per-document control = the
+meta CSP. Run against post-#14 it yields the next red-team targets: port-close
+timing on document destruction (the harness carries a second-load backstop
+rather than trusting port telemetry alone), `hello` replay and port transfer
+into nested frames (rung 9's kit; finding #9 says srcdoc children exist), and
+the sharpest one — revocation retracts *access*, never *effects*: the VERY EVIL
+namespace poison written before detection survives any teardown, which is a
+store-revocation question NAP-STORAGE will eventually have to answer.

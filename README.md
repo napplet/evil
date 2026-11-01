@@ -57,6 +57,11 @@ quiet. They demonstrate harm; they don't optimize for it.
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
+New rungs are selected against a **binding-lifetime checklist**: for every
+binding the spec establishes, probe what can replace one side of it while the
+key persists, and what invalidates it (see the postmortem in ROADMAP — finding
+#11 was upstream's, not ours; the checklist exists so the next one is ours).
+
 Each rung is a self-contained single-file NIP-5D artifact
 (`napplets/<id>/index.html`) you can `srcdoc` into **any** runtime, or into the
 included victim harness. Artifacts are built from `src/` (shared chrome +
