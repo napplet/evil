@@ -24,6 +24,8 @@ export async function loadHarness(page, opts = {}) {
   await page.goto(BASE + '/harness/');
   if (opts.preset) await page.check('input[name="preset"][value="' + opts.preset + '"]');
   if (opts.binding) await page.check('input[name="binding"][value="' + opts.binding + '"]');
+  if (opts.leakport === true) await page.check('input[name="leakport"]');
+  if (opts.sloppyrevoke === true) await page.check('input[name="sloppyrevoke"]');
   if (opts.csp === false) await page.uncheck('input[name="csp"]');
   if (opts.nostr === false) await page.uncheck('input[name="nostr"]');
   if (opts.sibling === true) await page.check('input[name="sibling"]');

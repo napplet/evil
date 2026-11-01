@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 95 automated checks against real
+**All ten rungs are built and validated** — 114 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -247,6 +247,50 @@ bootstrap hands over, revoke on a second `hello`/`load`/post-handoff
 window-level message/port close, and never speak NAP over
 `iframeWindow.postMessage`.
 
+### ✅ `evil-10-port-theft` — the port lifecycle after the handoff
+
+Status: **built + validated** — 19/19 (`tests/evil-10.spec.mjs`)
+
+Rung 9 attacked what #14 replaced; this rung attacks what #14 installed. The
+port is now the identity, and the spec makes three load-bearing claims about
+it — each probed:
+
+1. **"it MUST NOT be reachable from napplet code"** — private-port privacy is
+   bootstrap *conformance*, not a platform property. The reachable-graph
+   scanner (postMessage/start/close trio, MessagePort constructor) finds the
+   port wherever a sloppy bootstrap parks it — validated under the harness
+   dev-mode leak knob, found at `window.__nap_debug.port`. A conformant
+   bootstrap held the scan.
+2. **"an opaque-origin sandboxed document cannot hand it to a context that
+   outlives the document"** — false as a platform claim: transfer-list
+   postMessage works cross-origin between frames (it is how `napplet.hello`
+   itself travels). Validated: the frame handed one end of its own
+   MessageChannel to the sibling, which echoed back over it. Only claim 1's
+   conformance stands between a reached port and a surviving owner.
+3. **"the shell MUST close the port"** — load-bearing, and skipping it is a
+   realistic bug: a port transferred OUT of the document survives iframe
+   removal. Validated both ways by the detonation — the stolen port speaks as
+   the verified napplet from the sibling (two frames, one identity,
+   concurrently: the shell log shows PORT-ACCEPTED for the mule's request and
+   the grant served), then the napplet fires replacement evidence against
+   itself. A conformant shell closes the channel and the mule's post-revocation
+   probe goes unanswered (CHANNEL-DEAD — the fix holds). Under the sloppy-
+   revoke knob the channel stays alive: the surviving frame was served the
+   revoked identity's grants after its owner's destruction, and VERY EVIL
+   poisoned the namespace and exfiltrated to the collector over the stolen
+   port, post-revocation.
+
+| # | Attack | Spec clause |
+|---|--------|-------------|
+| 1 | private port reachability scan | §Transport: "MUST NOT be reachable from napplet code" |
+| 2 | cross-frame port transfer primitive | §Security: "cannot hand it to a context that outlives the document" |
+| 3 | stolen-port lifecycle: concurrent identity sharing → self-revoke → channel survival | §Identity: "the shell MUST close the port" |
+
+Armed by: a bootstrap that parks the private port anywhere reachable
+(findings #12). Disarmed by: keep the port in the bootstrap closure — and
+treat `close()` as the load-bearing step of teardown, because iframe removal
+kills nothing that was transferred out (findings #13).
+
 ## Validated findings against the NIP-5D spec
 
 Research notes for spec issues (to file upstream as the napplets validate them):
@@ -336,10 +380,31 @@ a **binding-lifetime checklist**. For every binding the spec establishes
 
 Run against pre-#14, this produces evil-09 on day one: key = the Window, event
 = self-navigation, invalidation = none in the text, per-document control = the
-meta CSP. Run against post-#14 it yields the next red-team targets: port-close
-timing on document destruction (the harness carries a second-load backstop
-rather than trusting port telemetry alone), `hello` replay and port transfer
-into nested frames (rung 9's kit; finding #9 says srcdoc children exist), and
-the sharpest one — revocation retracts *access*, never *effects*: the VERY EVIL
-namespace poison written before detection survives any teardown, which is a
-store-revocation question NAP-STORAGE will eventually have to answer.
+meta CSP. Run against post-#14 it produced rung 10: port privacy is bootstrap
+conformance, not a platform property (findings #12), and a transferred port
+outlives revocation unless `close()` is explicit (findings #13). Still open
+under the same checklist: `hello` replay and port transfer into *nested*
+frames (rung 9's kit; finding #9 says srcdoc children exist), per-document
+control re-injection when a shell recreates a torn-down frame (the meta CSP
+lives outside the hashed bytes — the recreate path must re-apply it), the
+MAY-recreate reload loop (an untrusted party driving shell scheduling), the
+in-flight revocation race (NAP already queued when close() lands), and the
+sharpest open one — revocation retracts *access*, never *effects*: the VERY
+evil namespace poison written before detection survives any teardown, which is
+a store-revocation question NAP-STORAGE will eventually have to answer.
+12. ✅ **The retained-port mitigation is bootstrap conformance, not a platform
+    property** — §Security's "an opaque-origin sandboxed document cannot hand
+    it to a context that outlives the document" is false as stated:
+    transfer-list postMessage works cross-origin between frames (it is how
+    `napplet.hello` itself travels). A reached port was handed to a sibling
+    frame and spoke as the verified napplet from there (validated by evil-10
+    under the dev-mode leak knob). What prevents theft is only the "MUST NOT
+    be reachable" conformance of the bootstrap — and a reachable-port scanner
+    belongs in every runtime's CI (evil-10's kit carries one).
+13. ✅ **A transferred port outlives revocation unless the shell explicitly
+    closes it** — "the shell MUST close the port" is the load-bearing step of
+    teardown: removing the iframe kills nothing that was transferred out of
+    the document. A shell that skips close() kept serving a revoked identity's
+    grants to a surviving frame after the napplet's own destruction (validated
+    by evil-10 under the sloppy-revoke knob, including post-revocation
+    namespace poison and exfiltration over the stolen channel).

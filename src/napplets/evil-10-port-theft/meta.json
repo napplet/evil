@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-10-port-theft",
+  "title": "evil-10 port theft",
+  "description": "Red-team napplet: attacks the post-#14 port lifecycle itself — scans for a reachable private port, proves the cross-frame transfer primitive, then detonates the full chain: steal the shell's bound port into a sibling frame, speak as the verified napplet from there, self-revoke, and test whether the channel (and the grants) survive the napplet's own destruction."
+}
