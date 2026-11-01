@@ -15,6 +15,9 @@
     every armed payload exactly + typed EXECUTE EVIL, then real execution.
   - default collector is https://evil.example.invalid/collect (RFC 2606,
     non-resolving): even in VERY EVIL mode nothing leaves the machine.
+  - detonation rows (autoRun: false) are the one demo shape that needs an
+    explicit click: proving the primitive replaces this frame's own document,
+    so the probe UI dies with it. Never part of the auto-run sweep.
 -->
 <style>
   :root {
@@ -119,6 +122,7 @@
   .chip.status-blocked { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); background: color-mix(in srgb, var(--ok) 10%, transparent); }
   .chip.status-sent { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
   .chip.status-na { color: var(--muted); }
+  .chip.status-ready { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: color-mix(in srgb, var(--warn) 12%, transparent); }
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
   .chip.sev-info { color: var(--muted); }
@@ -524,7 +528,7 @@ const ATTACKS = [
     return '<span class="chip ' + s + '">' + sev + '</span>';
   }
   function statusChip(st) {
-    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'na' ? 'N/A' : st || '—';
+    const label = st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : st === 'sent' ? 'SENT' : st === 'ready' ? 'READY' : st === 'na' ? 'N/A' : st || '—';
     return '<span class="chip status-' + (st || 'na') + '">' + label + '</span>';
   }
   function esc(s) {
@@ -537,14 +541,14 @@ const ATTACKS = [
       const div = document.createElement('div');
       div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
-      div.dataset.status = r.status || 'pending';
+      div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
       div.innerHTML =
         '<div class="attack-head">' +
           statusChip(r.status) +
           '<span class="attack-name">' + esc(a.name) + '</span>' +
           sevChip(a.severity) +
           '<span class="spacer"></span>' +
-          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">probe</button></div>' +
+          '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
         '</div>' +
         '<div class="attack-target">' + esc(a.target) + '</div>' +
         '<div class="evidence">' + esc(r.evidence || 'not probed') + '</div>';
@@ -555,15 +559,15 @@ const ATTACKS = [
     });
   }
   function renderSummary() {
-    const counts = { armed: 0, blocked: 0, na: 0, sent: 0 };
+    const counts = { armed: 0, blocked: 0, na: 0, sent: 0, ready: 0 };
     for (const a of ATTACKS) {
       const s = (state.results[a.id] || {}).status;
       if (counts[s] != null) counts[s]++;
     }
     summaryEl.innerHTML = state.veryEvil
       ? '<b>VERY EVIL MODE ACTIVE</b> · payloads executed'
-      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a';
-    const armable = counts.armed + counts.sent;
+      : 'demo mode · <b>' + counts.armed + ' armed</b> / <span class="ok-count">' + counts.blocked + ' held</span> / <span class="sent-count">' + counts.sent + ' sent</span> / ' + counts.na + ' n/a' + (counts.ready ? ' / <span class="sent-count">' + counts.ready + ' ready — detonate</span>' : '');
+    const armable = counts.armed + counts.sent + counts.ready;
     armBtn.disabled = armable === 0;
     armBtn.title = armable === 0 ? 'nothing armed — runtime held every probe' : armable + ' attack(s) armable';
   }
@@ -605,7 +609,7 @@ const ATTACKS = [
     updateReport();
   }
   async function runAllDemos() {
-    for (const a of ATTACKS) await runDemo(a.id);
+    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
   }
 
   /* ---------- VERY EVIL ---------- */
@@ -615,10 +619,15 @@ const ATTACKS = [
     const last = ATTACKS.filter((a) => a.evil && a.destructive);
     return plain.concat(last);
   }
+  function effectiveStatus(a) {
+    const s = (state.results[a.id] || {}).status;
+    // detonation rows are armed by construction: unprobed === ready
+    return a.autoRun === false && !s ? 'ready' : s;
+  }
   function openConfirm() {
     const armable = planOrder().filter((a) => {
-      const s = (state.results[a.id] || {}).status;
-      return s === 'armed' || s === 'sent';
+      const s = effectiveStatus(a);
+      return s === 'armed' || s === 'sent' || s === 'ready';
     });
     if (!armable.length) return;
     planList.innerHTML = '';
@@ -652,8 +661,8 @@ const ATTACKS = [
     logLine('collector: ' + state.collector);
     renderSummary();
     for (const a of planOrder()) {
-      const st = (state.results[a.id] || {}).status;
-      if (st !== 'armed' && st !== 'sent') {
+      const st = effectiveStatus(a);
+      if (st !== 'armed' && st !== 'sent' && st !== 'ready') {
         state.evilResults[a.id] = { skipped: 'not armed (' + (st || 'unprobed') + ') — runtime holds' };
         logLine('SKIP ' + a.name + ' — not armable, the runtime holds');
         updateReport();

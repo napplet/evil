@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All eight rungs are built and validated** — 71 automated checks against real
+**All nine rungs are built and validated** — 95 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -189,6 +189,64 @@ Validated results:
   oracle exists from in-frame JS — that tier is reserved for genuine
   microarchitectural work.
 
+### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
+
+Status: **built + validated** — 24/24 (`tests/evil-09.spec.mjs`)
+
+The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
+iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
+token or CSP fetch directive stops a frame from navigating *itself*: a napplet
+can replace its own document with unverified bytes that the shell keeps
+routing as the verified napplet. Fixed upstream by NIP-5D PR #14 (per-document
+`MessagePort` binding + revoke-on-replacement); this rung and the harness
+`identity binding: port` knob are the regression gate.
+
+Validated results:
+
+- **The primitive always exists**: `allow-scripts` does not stop self-
+  navigation — DETONATE (operator-triggered, never auto-run) replaced the
+  verified document in-place, same Window, via both the network path
+  (`harness/replace-target.html`, the attacker-page stand-in) and a data: URL.
+- **Window-keyed shells hand over everything**: raw window-level NAP from the
+  unverified stage-2 bytes was ACCEPTED and served the verified napplet's
+  namespace seed (`victim-data-INHERITED-BY-EVIL-09`); the shell logged the
+  attacker document's report and left the frame in place — no teardown, no
+  clue.
+- **CSP fate is path-dependent** (a refinement of the #14 text): on the
+  *network* replacement the injected meta CSP evaporates — eval() was blocked
+  in the verified document and runs in the replacement, exactly as the #14
+  Security Considerations describe. But Chromium's policy-container inheritance
+  carries the meta CSP through *data:/blob:* replacements — the CSP held there.
+  The realistic attack (attacker's own page) is the CSP-free path; scheme-local
+  replacements get Chromium's bonus hardening.
+- **Navigation-URL disclosure survives the fix**: data the verified napplet
+  legitimately read crossed the document boundary inside the navigation URL
+  and arrived in the replacement's `location.search` — no directive governs a
+  frame navigating itself, and post-#14 revocation cannot recall it.
+- **The port-bound knob holds (the green gate)**: under `identity binding:
+  port` the NAP roundtrip shows no window-level envelope to sniff, and
+  detonation ends in `REVOKED` — the shell drops the replacement document's
+  window-level NAP as replacement evidence, tears the identity, grants, and
+  iframe down. No stage-2 write can land.
+- VERY EVIL under window binding: unverified stage-2 bytes POISONED the verified
+  namespace (`__evil09_poison__` for the next legit load to inherit) and
+  exfiltrated the seed to the collector via the navigation URL — two egress
+  channels, end to end.
+
+| # | Attack | Spec clause |
+|---|--------|-------------|
+| 1 | identity keyed to this Window (passive window-level NAP sniff) | pre-#14 §Transport/§Identity: window-level postMessage + "map the iframe's Window" |
+| 2 | frame self-replacement → identity & grant inheritance by unverified bytes | pre-#14 §Identity; #14: "a Window reference survives same-frame navigation" |
+| 3 | injected meta CSP evaporation on network replacement | §Security CSP advisory; #14: "a meta CSP applies only to the document it was injected into" |
+| 4 | navigation-URL data disclosure (survives the fix by design) | #14 §Security: "cannot recall what was already sent" |
+| 5 | replacement telemetry (second hello / load / port close — shell-side, honestly `na`) | post-#14 §Identity: revoke-on-replacement evidence |
+
+Armed by: every pre-#14-shaped shell (the spec's own model). Disarmed by: the
+post-#14 port binding — bind identity to the port the verified document's
+bootstrap hands over, revoke on a second `hello`/`load`/post-handoff
+window-level message/port close, and never speak NAP over
+`iframeWindow.postMessage`.
+
 ## Validated findings against the NIP-5D spec
 
 Research notes for spec issues (to file upstream as the napplets validate them):
@@ -223,3 +281,14 @@ Research notes for spec issues (to file upstream as the napplets validate them):
 10. 🔎 **Manifest metadata rendering** — "plain text, not HTML" is a MUST on
     clients; innerHTML launchers hand the shell to the attacker (validated
     against the unsafe launcher in evil-04).
+11. ✅ **Window-keyed identity survives self-replacement** — pre-#14 NIP-5D
+    mapped `(dTag, artifactHash)` + every grant to the iframe `Window`, which
+    persists across same-frame navigation: a napplet that navigates its own
+    frame hands the verified identity to unverified bytes (validated by
+    evil-09 — grants, namespace, and shell log all served the replacement
+    document). The injected meta CSP is per-document: it dies with the
+    verified document on network navigations (eval re-opened in the
+    replacement) but Chromium's policy-container inheritance carries it
+    through data:/blob: replacements. Fixed upstream by NIP-5D #14
+    (per-document MessagePort binding + revoke-on-replacement); the harness
+    `identity binding: port` knob is the regression gate.

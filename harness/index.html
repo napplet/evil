@@ -44,6 +44,11 @@
     <label><input type="radio" name="preset" value="no-sandbox"> worst — no sandbox attr</label>
   </fieldset>
   <fieldset>
+    <legend>identity binding (NIP-5D #14)</legend>
+    <label><input type="radio" name="binding" value="window" checked> window — pre-#14: map Window → (dTag, hash) · self-replacement inherits</label>
+    <label><input type="radio" name="binding" value="port"> port — post-#14: napplet.hello port handoff · revoke on replacement</label>
+  </fieldset>
+  <fieldset>
     <legend>shell surface</legend>
     <label><input type="checkbox" name="csp" checked> inject CSP meta (spec baseline)</label>
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
@@ -77,6 +82,7 @@
       <option value="evil-06-side-channels">evil-06 side channels</option>
       <option value="evil-07-fingerprint">evil-07 fingerprint</option>
       <option value="evil-08-wasm-timing">evil-08 wasm timing</option>
+      <option value="evil-09-self-replacement">evil-09 self-replacement</option>
     </select>
     <button type="button" id="loadBtn">load napplet</button>
   </fieldset>
@@ -103,7 +109,7 @@
 'use strict';
 (function () {
   const controls = document.getElementById('controls');
-  const frame = document.getElementById('frame');
+  let frame = document.getElementById('frame');
   const meta = document.getElementById('meta');
   const msgs = document.getElementById('msgs');
   const nappletSel = document.getElementById('nappletSel');
@@ -115,6 +121,37 @@
   let store = {};
   window.__evilStore = () => store;
   window.__evilLogLines = [];
+  /* post-#14 port session: (dTag, artifactHash) + grants bound to the port
+     handed over by the verified document's bootstrap — never to the Window. */
+  let session = null;
+  let portSeq = 0;
+  function revoke(reason) {
+    if (!session) return;
+    const s = session;
+    session = null;
+    try { s.port.onclose = null; s.port.onmessageerror = null; s.port.onmessage = null; s.port.close(); } catch (_) {}
+    log('REVOKED identity (dTag=' + s.dTag + ') — ' + reason + ' · grants revoked, iframe removed');
+    try { frame.remove(); } catch (_) {}
+  }
+  function bindPort(port) {
+    const sess = { port: port, dTag: frame.dataset.dTag, hash: frame.dataset.artifactHash, runtime: frame.dataset.runtime === '1' };
+    session = sess;
+    port.onmessage = (e) => {
+      const d = e.data;
+      if (!d || typeof d.type !== 'string') return;
+      log('PORT-ACCEPTED ' + JSON.stringify(d).slice(0, 120));
+      if (d.type.indexOf('storage.') === 0) {
+        if (!sess.runtime) { log('DROPPED storage.* over port — no storage domain granted'); return; }
+        void handleStorage(d, sess, (payload) => port.postMessage(payload));
+        return;
+      }
+      // other NAP domains: unrecognized → silently ignored per NIP-5D
+    };
+    port.onclose = () => revoke('bound port closed — the verified document was destroyed or replaced');
+    port.onmessageerror = () => revoke('port messageerror — document replaced');
+    portSeq++;
+    log('HELLO accepted — (dTag=' + sess.dTag + ', artifactHash=' + sess.hash.slice(0, 12) + '…) bound to port #' + portSeq + ' for the lifetime of ONE document');
+  }
   function dumpStore() {
     storeEl.textContent = JSON.stringify(store, null, 2);
   }
@@ -170,16 +207,55 @@
     '})();<\/script>',
   ].join('\n');
 
+  /* post-#14 transport bootstrap: injected into the artifact head BEFORE any
+     napplet script runs, OUTSIDE the hashed bytes. Creates the MessageChannel,
+     keeps port1 private in this closure (dies with this document), and hands
+     port2 to the shell exactly once via napplet.hello. */
+  function portBootstrap(withStorage) {
+    const lines = [
+      '<script>(function () {',
+      '  var ch = new MessageChannel();',
+      '  var port = ch.port1; /* private: retained only in this closure + this document */',
+      '  var pending = new Map();',
+      '  port.onmessage = function (e) { var d = e.data; if (d && d.id && pending.has(d.id)) { var p = pending.get(d.id); pending.delete(d.id); p(d); } };',
+      '  function req(type, payload) {',
+      '    return new Promise(function (resolve) {',
+      '      var id = "nap-" + Math.random().toString(16).slice(2);',
+      '      pending.set(id, resolve);',
+      '      port.postMessage(Object.assign({ type: type, id: id }, payload || {}));',
+      '      setTimeout(function () { if (pending.has(id)) { pending.delete(id); resolve({ error: "timeout" }); } }, 5000);',
+      '    });',
+      '  }',
+      '  function ok(r) { if (r && r.error) throw new Error(r.error); return r; }',
+    ];
+    if (withStorage) {
+      lines.push(
+        '  window.napplet = { storage: {',
+        '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
+        '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
+        '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+        '  } };'
+      );
+    } else {
+      lines.push('  window.napplet = {}; /* no domains granted */');
+    }
+    lines.push(
+      '  window.parent.postMessage({ type: "napplet.hello" }, "*", [ch.port2]);',
+      '})();<\/script>'
+    );
+    return lines.join('\n');
+  }
+
   function knownWindow(source) {
-    if (source === frame.contentWindow) return frame;
+    if (frame && source === frame.contentWindow) return frame;
     const sibs = document.querySelectorAll('#siblingCol iframe');
     for (const s of sibs) if (source === s.contentWindow) return s;
     return null;
   }
 
-  function nsFor(frameEl, msg, policy, trustDeclared) {
-    const d = frameEl.dataset.dTag;
-    const h = frameEl.dataset.artifactHash;
+  function nsFor(ident, msg, policy, trustDeclared) {
+    const d = ident.dTag;
+    const h = ident.hash;
     if (trustDeclared && (msg.windowId || msg.dTag)) return 'd:' + (msg.dTag || msg.windowId); // the sloppy shortcut
     if (policy === 'global') return 'global';
     if (policy === 'by-dtag') return 'd:' + d;
@@ -188,13 +264,13 @@
 
   function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-  async function handleStorage(msg, frameEl, source) {
+  async function handleStorage(msg, ident, send) {
     const policy = new FormData(controls).get('policy');
     const trustDeclared = new FormData(controls).get('trustdeclared') === 'on';
-    const ns = nsFor(frameEl, msg, policy, trustDeclared);
+    const ns = nsFor(ident, msg, policy, trustDeclared);
     if (!store[ns]) store[ns] = {};
     const nsStore = store[ns];
-    const reply = (payload) => source.postMessage(Object.assign({ type: msg.type + '.result', id: msg.id }, payload), '*');
+    const reply = (payload) => send(Object.assign({ type: msg.type + '.result', id: msg.id }, payload));
     if (msg.type === 'storage.get') {
       const hit = Object.prototype.hasOwnProperty.call(nsStore, msg.key);
       await delay(hit ? 40 : 6); // hit/miss latency difference: evil-06's oracle backend
@@ -240,6 +316,39 @@
   window.addEventListener('message', (e) => {
     const d = e.data;
     if (!d || typeof d.type !== 'string') return;
+    const binding = new FormData(controls).get('binding') || 'window';
+    if (binding === 'port') {
+      /* post-#14: NAP rides the bound port only. Window-level messages from
+         the frame are replacement evidence (except the harness's own evil.*
+         test channel, which real shells do not have and should also revoke). */
+      if (d.type === 'napplet.hello') {
+        if (session && e.source === frame.contentWindow) {
+          log('DROPPED second napplet.hello — replacement evidence');
+          revoke('second napplet.hello from a frame that already handed off');
+          return;
+        }
+        if (!session && frame && e.source === frame.contentWindow && e.ports && e.ports.length === 1) {
+          bindPort(e.ports[0]);
+          return;
+        }
+        log('DROPPED napplet.hello from wrong source or without exactly one port');
+        return;
+      }
+      const frameEl = knownWindow(e.source);
+      if (!frameEl) {
+        log('DROPPED message from UNKNOWN source: ' + JSON.stringify(d).slice(0, 140));
+        return;
+      }
+      if (frameEl === frame) {
+        const nap = d.type.indexOf('storage.') === 0 || d.type.indexOf('napplet.') === 0;
+        log('DROPPED window-level ' + (nap ? 'NAP (' + d.type + ') — post-handoff window-level NAP is replacement evidence' : 'non-NAP chatter (' + d.type + ') — port mode speaks only over the bound port'));
+        if (nap) revoke('post-handoff window-level NAP message: ' + d.type);
+        return;
+      }
+      log('DROPPED message from sibling (no port session): ' + JSON.stringify(d).slice(0, 140));
+      return;
+    }
+    /* pre-#14 window binding: the shell routes by Window — the vulnerability. */
     const frameEl = knownWindow(e.source);
     if (!frameEl) {
       log('DROPPED message from UNKNOWN source: ' + JSON.stringify(d).slice(0, 140));
@@ -254,13 +363,17 @@
       renderLauncher(d.manifest);
       return;
     }
+    if (d.type === 'evil.stage2.report') {
+      log('[stage-2] ATTACKER DOCUMENT reported: ' + JSON.stringify(d.report || {}).slice(0, 300));
+      return;
+    }
     if (d.type.indexOf('storage.') === 0) {
       if (frameEl.dataset.runtime !== '1') {
         log('DROPPED storage.* from frame with NO runtime domain: ' + JSON.stringify(d).slice(0, 120));
         return;
       }
       log('ACCEPTED ' + JSON.stringify(d).slice(0, 120));
-      void handleStorage(d, frameEl, e.source);
+      void handleStorage(d, { dTag: frameEl.dataset.dTag, hash: frameEl.dataset.artifactHash }, (payload) => e.source.postMessage(payload, '*'));
       return;
     }
     // Unrecognized types are silently ignored (NIP-5D forward compatibility)
@@ -269,6 +382,7 @@
   async function load() {
     const f = new FormData(controls);
     const preset = f.get('preset');
+    const binding = f.get('binding') || 'window';
     const cspOn = f.get('csp') === 'on';
     const nostrOn = f.get('nostr') === 'on';
     const runtimeOn = f.get('runtime') === 'on';
@@ -285,14 +399,38 @@
         ? artifact.replace(/<head[^>]*>/i, (m) => m + cspMeta)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + cspMeta + '</head>');
     }
-    if (runtimeOn) {
+    if (binding === 'port') {
+      // post-#14: the hello bootstrap is transport — injected for every load;
+      // the storage domain rides the same private port.
+      const bootstrap = portBootstrap(runtimeOn);
+      artifact = /<head[^>]*>/i.test(artifact)
+        ? artifact.replace(/<head[^>]*>/i, (m) => m + bootstrap)
+        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + bootstrap + '</head>');
+    } else if (runtimeOn) {
       artifact = /<head[^>]*>/i.test(artifact)
         ? artifact.replace(/<head[^>]*>/i, (m) => m + RUNTIME_SHIM)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + RUNTIME_SHIM + '</head>');
     }
 
-    /* shell-side identity: map the iframe Window to (dTag, artifactHash) —
-       computed from the verified bytes, never accepted from the napplet */
+    /* supersede any live port session from a previous load */
+    if (session) {
+      try { session.port.onclose = null; session.port.onmessageerror = null; session.port.onmessage = null; session.port.close(); } catch (_) {}
+      session = null;
+    }
+
+    /* fresh iframe per load — the old frame's document (and any port bound
+       to it) dies with it, exactly like a real shell re-creating a napplet */
+    if (frame) frame.remove();
+    frame = document.createElement('iframe');
+    frame.id = 'frame';
+    frame.title = 'napplet under test';
+    document.querySelector('#stage > div').appendChild(frame);
+
+    /* shell-side identity: computed from the verified bytes, never accepted
+       from the napplet. window binding (pre-#14): map the iframe WINDOW to
+       (dTag, artifactHash) — survives same-frame navigation (the flaw).
+       port binding (post-#14): bind to the port the verified document's
+       bootstrap hands over (see bindPort) — dies with that document. */
     frame.dataset.dTag = napplet;
     frame.dataset.artifactHash = hash;
     frame.dataset.runtime = runtimeOn ? '1' : '0';
@@ -300,6 +438,16 @@
     if (preset === 'spec') frame.setAttribute('sandbox', 'allow-scripts');
     else if (preset === 'same-origin') frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
     else frame.removeAttribute('sandbox');
+
+    /* post-#14 replacement watch: a second load on a bound iframe means the
+       verified document was replaced (self-navigation or reload) */
+    let loadCount = 0;
+    frame.addEventListener('load', () => {
+      loadCount++;
+      if (binding === 'port' && loadCount > 1 && session) {
+        revoke('second load event on the bound iframe — the verified document was replaced');
+      }
+    });
 
     frame.srcdoc = artifact;
 
@@ -337,10 +485,12 @@
     const ownNs = policy === 'global' ? 'global' : policy === 'by-dtag' ? 'd:' + sel : 'dh:' + sel + ':' + hash;
     if (!store[ownNs]) store[ownNs] = {};
     store[ownNs]['__evil06_seeded__'] = 'present';
+    store[ownNs]['__evil09_victim__'] = 'victim-data-INHERITED-BY-EVIL-09';
     dumpStore();
 
     meta.textContent =
       'preset: ' + preset +
+      ' · identity binding: ' + binding + (binding === 'port' ? ' (post-#14 port-bound)' : ' (pre-#14 window-keyed)') +
       ' · csp meta: ' + (cspOn ? 'injected' : 'omitted') +
       ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
       ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
