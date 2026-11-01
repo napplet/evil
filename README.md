@@ -19,6 +19,15 @@ attack primitive is available — with masked, non-actionable evidence — and t
   marker key to prove storage access, nothing more)
 - no network egress (no fetch, no WebSocket, no beacons, no popups)
 - no signing, no navigation, no persistence, no destruction
+  (one exception: detonation rows — see below)
+
+**Detonation rows.** Attacks that prove their primitive by replacing the
+napplet's *own* document (`autoRun: false`, evil-09) never fire in the auto-run
+sweep — the operator clicks DETONATE. The replacement is in-frame only:
+unverified bytes loaded into the same Window (a data: URL, or a same-host
+network target — `harness/replace-target.html` — standing in for the
+attacker's server), no egress, no writes. The probe UI dies with the verified
+document by design; reload the napplet from the harness to restore it.
 
 **"VERY EVIL" mode.** Each napplet can be armed from inside the napplet. Arming
 requires a stern confirmation dialog that lists **every armed attack and exactly what
@@ -42,9 +51,9 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 0 | Baseline misconfig — poorly implemented runtimes | `evil-01` sandbox escape, `evil-02` CSP / network egress |
 | 1 | Transport confusion — lazy runtimes | `evil-03` envelope forging & reply injection |
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
-| 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-08` |
+| 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All eight rungs are built and validated** — 71 automated checks against real
+**All nine rungs are built and validated** — 95 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -66,6 +75,15 @@ every knob re-arms a different subset of the attacks:
 - **runtime preset** — `spec` (`sandbox="allow-scripts"` + CSP), `same-origin`
   (+`allow-same-origin`), `no-sandbox` (no sandbox attr) — arms the evil-01
   escape tree; `spec` is the green gate your runtime's CI should hold.
+- **identity binding** — `window` (pre-#14 NIP-5D: the shell maps the iframe
+  Window to `(dTag, artifactHash)` — a Window survives same-frame navigation,
+  which arms the evil-09 self-replacement inheritance) vs `port` (post-#14:
+  the injected bootstrap hands a `MessageChannel` port over once via
+  `napplet.hello`; the shell revokes identity, grants, and the iframe on a
+  second hello, a second load, post-handoff window-level NAP, or the port
+  closing — the green gate evil-09 must not survive). Port mode is strict:
+  legacy napplets that speak window-level NAP get dropped and the frame torn
+  down, exactly as the fixed spec demands.
 - **CSP meta** — on/off. Off arms every evil-02 egress channel; on holds them
   (except WebRTC — the spec gap, see ROADMAP).
 - **shell `window.nostr`** — a fake NIP-07 extension, arms ambient-signing probes.
@@ -81,9 +99,10 @@ every knob re-arms a different subset of the attacks:
   render — arms the evil-04 shell-origin XSS end to end.
 
 It also seeds victim canaries (`nsec` marker in `localStorage`, inherited v1
-  secrets per namespace policy), echoes `evil.ping` with a shell-side wall clock
-  (so frames can measure shell starvation), logs every ACCEPTED/DROPPED
-  message, and dumps the runtime store.
+  secrets per namespace policy, and a per-load `__evil09_victim__` grant seed),
+  echoes `evil.ping` with a shell-side wall clock (so frames can measure shell
+  starvation), logs every ACCEPTED/DROPPED/REVOKED message, and dumps the
+  runtime store.
 
 ## Repo layout
 
@@ -96,8 +115,9 @@ napplets/
   <id>/index.html                     # built single-file NIP-5D artifacts (committed)
 harness/
   index.html                          # configurable victim shell
+  replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-8].spec.mjs   # 71 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 95 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 

@@ -1,0 +1,5 @@
+{
+  "dTag": "evil-09-self-replacement",
+  "title": "evil-09 frame self-replacement",
+  "description": "Red-team napplet: pre-#14 shells map (dTag, artifactHash) to the iframe Window — which survives same-frame navigation. Detonate to replace this verified document with unverified stage-2 bytes that inherit identity and grants, and shed the injected meta CSP."
+}
