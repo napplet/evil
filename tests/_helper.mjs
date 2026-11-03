@@ -28,6 +28,7 @@ export async function loadHarness(page, opts = {}) {
   if (opts.nostr === false) await page.uncheck('input[name="nostr"]');
   if (opts.sibling === true) await page.check('input[name="sibling"]');
   if (opts.runtime === true) await page.check('input[name="runtime"]');
+  if (opts.nestedlock === true) await page.check('input[name="nestedlock"]');
   if (opts.policy) await page.selectOption('select[name="policy"]', opts.policy);
   if (opts.trustDeclared === true) await page.check('input[name="trustdeclared"]');
   if (opts.launcher) await page.check('input[name="launcher"][value="' + opts.launcher + '"]');

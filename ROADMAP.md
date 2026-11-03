@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 95 automated checks against real
+**All nine rungs are built and validated** — 104 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -52,7 +52,7 @@ NIP-07 extension injecting `window.nostr` into iframes (all_frames).
 
 ### ✅ `evil-02-csp-egress` — CSP & network egress
 
-Status: **built + validated** — 16/16 (`tests/evil-02.spec.mjs`)
+Status: **built + validated** — 25/25 (`tests/evil-02.spec.mjs`)
 
 `connect-src 'none'` is the only thing between an opaque-origin frame and the
 network (a srcdoc iframe has no HTTP response to carry a CSP *header*).
@@ -67,6 +67,27 @@ Validated results:
   conservative baseline.** No directive covers WebRTC. Runtimes need a
   Permissions Policy or constructor neutering in the injected namespace;
   NIP-5D's advisory should say so.
+- **Spec gap confirmed (findings #12, kehto/web#381): the grandchild-frame
+  WebRTC vector.** The `webrtc` probe only measures the top napplet realm —
+  a runtime that neuters `RTC*` there (kehto/web#384/#386) reports WebRTC
+  closed while a child frame still buys a fresh realm with a live
+  `RTCPeerConnection`. `webrtc-grandchild` runs a kehto/web#393-mirror
+  bypass battery — createElement case variants, createElementNS,
+  innerHTML/outerHTML/insertAdjacentHTML, DOMParser+adopt,
+  createContextualFragment, setHTMLUnsafe, template clone, execCommand
+  insertHTML, factory recovery (delete+reassign), fresh `Document`
+  (implementation.createHTMLDocument+adopt), object/embed — and reports every
+  per-vector result. Under the spec baseline multiple vectors mint
+  `about:srcdoc` realms whose RTC is live (frame-src does not reach srcdoc
+  children). `document.write` is documented, not executed: it destroys the
+  probe UI — same Trusted Types string-sink class as innerHTML, which the
+  battery does exercise. Only prevention closes the vector while no
+  `webrtc` CSP directive exists — the #393 class — which the harness
+  `nested-context lock` knob mirrors (Trusted Types default policy passing
+  canonical HTML and rejecting frame-tag strings, non-configurable factory
+  pins, fail-closed byte scan of the verified bytes). Lock OFF — the battery
+  arms and the fresh realms report live RTC; lock ON — zero contexts minted,
+  `window.length` stays 0 across all 16 vectors. Both paths are CI-gated.
 - Prefetch / dns-prefetch hint loads are unverifiable from inside the frame —
   honest `na` ("treat the channel as open"): no directive governs them either.
 
@@ -292,3 +313,14 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     through data:/blob: replacements. Fixed upstream by NIP-5D #14
     (per-document MessagePort binding + revoke-on-replacement); the harness
     `identity binding: port` knob is the regression gate.
+12. ✅ **Grandchild frames mint fresh un-neutered realms** — an
+    `about:srcdoc`/`about:blank` child of a napplet is a fresh realm with a
+    live `RTCPeerConnection` that NO CSP directive reaches (`frame-src` does
+    not block srcdoc children), so top-realm `RTC*` neutering
+    (kehto/web#384/#386) is invisible to it: a napplet mints a child frame and
+    egresses from there (kehto/web#381 — the gap kehto/web#393's prevention
+    closed in Kehto). While no `webrtc` CSP directive exists, only prevention
+    closes it: the #393 class — Trusted Types default policy + pinned
+    element factories + a fail-closed host byte scan. Validated by evil-02's
+    16-vector `webrtc-grandchild` battery; the harness `nested-context lock`
+    knob is the green gate (arms off / holds on, both CI-gated).

@@ -53,7 +53,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 95 automated checks against real
+**All nine rungs are built and validated** — 104 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -85,7 +85,17 @@ every knob re-arms a different subset of the attacks:
   legacy napplets that speak window-level NAP get dropped and the frame torn
   down, exactly as the fixed spec demands.
 - **CSP meta** — on/off. Off arms every evil-02 egress channel; on holds them
-  (except WebRTC — the spec gap, see ROADMAP).
+  (except WebRTC — and the grandchild-frame fresh realm — the spec gaps, see ROADMAP).
+- **nested-context lock** — on/off. The kehto/web#393-style prevention gate for
+  the evil-02 grandchild-frame WebRTC vector (kehto/web#381): a Trusted Types
+  default policy (canonical HTML passes through, frame-tag strings are
+  rejected — closes innerHTML/outerHTML/DOMParser/createContextualFragment/
+  setHTMLUnsafe/srcdoc/document.write), pinned element factories
+  (createElement/createElementNS/DOMImplementation.createDocument
+  non-configurable, frame tag names denied), and a fail-closed byte scan of
+  the verified artifact before load. Off — the battery arms (fresh grandchild
+  realms report a live RTCPeerConnection); on — zero nested contexts minted,
+  `window.length` stays 0. `tests/evil-02.spec.mjs` gates both paths.
 - **shell `window.nostr`** — a fake NIP-07 extension, arms ambient-signing probes.
 - **sibling iframe** — arms `parent.length` enumeration.
 - **fake NAP runtime** — injects a `window.napplet.storage` domain (pre-script,

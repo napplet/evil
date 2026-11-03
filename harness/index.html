@@ -51,6 +51,7 @@
   <fieldset>
     <legend>shell surface</legend>
     <label><input type="checkbox" name="csp" checked> inject CSP meta (spec baseline)</label>
+    <label><input type="checkbox" name="nestedlock"> nested-context lock (#393: TT default + factory pins + byte scan)</label>
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
   </fieldset>
@@ -117,6 +118,57 @@
   const storeEl = document.getElementById('store');
 
   const CSP_BASELINE = 'default-src \'none\'; script-src \'unsafe-inline\' \'wasm-unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:; font-src data:; connect-src \'none\'; worker-src \'none\'; child-src \'none\'; frame-src \'none\'; media-src \'none\'; object-src \'none\'; manifest-src \'none\'; base-uri \'none\'; form-action \'none\'';
+
+  /* kehto/web#393-style nested-context lock (PREVENTION, not detection).
+     Injected into the napplet head BEFORE any napplet script and OUTSIDE the
+     hashed bytes when the nestedlock knob is on. Three layers:
+       1. Trusted Types: the injected meta carries
+          `require-trusted-types-for 'script'; trusted-types default`, and this
+          prelude registers the one admitted default policy — canonical HTML
+          passes through unchanged, any frame-tag string is rejected. Closes
+          innerHTML/outerHTML/insertAdjacentHTML/DOMParser/
+          createContextualFragment/setHTMLUnsafe/document.write/srcdoc —
+          every string sink.
+       2. Factory pins: createElement / createElementNS /
+          DOMImplementation.createDocument pinned non-configurable, rejecting
+          frame tag names (iframe/frame/frameset/object/embed) — the only
+          element factories. delete+reassign recovery lands back on the guard.
+       3. Byte scan: see load() — the shell refuses verified bytes that
+          declare static frame markup, before they become a document.
+     Together: no fresh realm (with a live RTCPeerConnection no CSP directive
+     reaches — kehto/web#381) is ever minted from the napplet realm. */
+  const LOCK_PRELUDE = [
+    '<script>(function () {',
+    '  function deny(n) { throw new TypeError(\'nested browsing contexts are locked: \' + n); }',
+    '  var FRAME = /^(iframe|frame|frameset|object|embed)$/i;',
+    '  var SCAN = /<' + '\\s*' + '\\/?' + '\\s*' + '(?:iframe|frame|object|embed)\\b/i;',
+    '  if (window.trustedTypes && window.trustedTypes.createPolicy) {',
+    '    try {',
+    '      window.trustedTypes.createPolicy(\'default\', {',
+    '        createHTML: function (s) { if (SCAN.test(s)) deny(String(s).slice(0, 40)); return s; }',
+    '      });',
+    '      window.__evilLockTT = \'default policy registered\';',
+    '    } catch (e) { window.__evilLockTT = \'TT policy failed: \' + String(e); }',
+    '  } else { window.__evilLockTT = \'trustedTypes unavailable\'; }',
+    '  function pin(proto, prop, wrap) {',
+    '    try {',
+    '      var d = Object.getOwnPropertyDescriptor(proto, prop);',
+    '      if (!d || !d.configurable) return;',
+    '      Object.defineProperty(proto, prop, { configurable: false, enumerable: d.enumerable, writable: d.writable !== false, value: wrap(d.value) });',
+    '    } catch (e) {}',
+    '  }',
+    '  function localName(n) { return String(n == null ? \'\' : n).replace(/^[^:]*:/, \'\').toLowerCase(); }',
+    '  function guardFactory(orig) {',
+    '    return function (t) { var s = String(t == null ? \'\' : t).toLowerCase(); if (FRAME.test(s)) deny(s); return orig.apply(this, arguments); };',
+    '  }',
+    '  function guardNSFactory(orig) {',
+    '    return function (ns, n) { var s = localName(n); if (FRAME.test(s)) deny(s); return orig.apply(this, arguments); };',
+    '  }',
+    '  pin(Document.prototype, \'createElement\', guardFactory);',
+    '  pin(Document.prototype, \'createElementNS\', guardNSFactory);',
+    '  pin(DOMImplementation.prototype, \'createDocument\', guardNSFactory);',
+    '})();<\/script>',
+  ].join('\n');
 
   let store = {};
   window.__evilStore = () => store;
@@ -384,6 +436,7 @@
     const preset = f.get('preset');
     const binding = f.get('binding') || 'window';
     const cspOn = f.get('csp') === 'on';
+    const nestedLockOn = f.get('nestedlock') === 'on';
     const nostrOn = f.get('nostr') === 'on';
     const runtimeOn = f.get('runtime') === 'on';
     const policy = f.get('policy');
@@ -393,11 +446,35 @@
     const raw = await res.text();
     const hash = await sha256Hex(raw);
     let artifact = raw;
+    /* kehto/web#393 layer 3: byte scan of the VERIFIED bytes. Refuse static
+       frame markup before the bytes become a document — fail closed, no
+       frame created. (Scripts assembling frame strings at runtime are not
+       static markup; those are layers 1–2's job.) */
+    if (nestedLockOn) {
+      const hit = raw.match(/<\s*(?:iframe|frame|object|embed)\b/i);
+      if (hit) {
+        log('REFUSED load — nested-context lock byte scan found static frame markup in the verified bytes: ' + JSON.stringify(hit[0]));
+        meta.textContent = 'REFUSED (fail closed): nested-context lock byte scan found ' + JSON.stringify(hit[0]) + ' in ' + napplet + '/index.html — no frame loaded, no srcdoc document created';
+        return;
+      }
+    }
     if (cspOn) {
       const cspMeta = '<meta http-equiv="Content-Security-Policy" content="' + CSP_BASELINE.replace(/"/g, '&quot;') + '">';
       artifact = /<head[^>]*>/i.test(artifact)
         ? artifact.replace(/<head[^>]*>/i, (m) => m + cspMeta)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + cspMeta + '</head>');
+    }
+    if (nestedLockOn) {
+      /* kehto/web#393 layers 1+2: the TT meta (require-trusted-types-for
+         'script'; trusted-types default — enforced before the prelude runs)
+         and the lock prelude (the one admitted default policy + factory
+         pins). Injected OUTSIDE the hashed bytes, before any napplet script. */
+      const lockInject =
+        '<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for \'script\'; trusted-types default">' +
+        LOCK_PRELUDE;
+      artifact = /<head[^>]*>/i.test(artifact)
+        ? artifact.replace(/<head[^>]*>/i, (m) => m + lockInject)
+        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + lockInject + '</head>');
     }
     if (binding === 'port') {
       // post-#14: the hello bootstrap is transport — injected for every load;
@@ -451,6 +528,8 @@
 
     frame.srcdoc = artifact;
 
+    log('nested-context lock: ' + (nestedLockOn ? 'ON — TT default policy + factory pins + byte scan (#393 prevention)' : 'off — grandchild-frame creation vectors open (kehto/web#381)'));
+
     if (!nostrOn) delete window.nostr;
 
     /* sibling frame toggle */
@@ -492,6 +571,7 @@
       'preset: ' + preset +
       ' · identity binding: ' + binding + (binding === 'port' ? ' (post-#14 port-bound)' : ' (pre-#14 window-keyed)') +
       ' · csp meta: ' + (cspOn ? 'injected' : 'omitted') +
+      ' · nested-context lock: ' + (nestedLockOn ? 'ON (TT default policy + factory pins + byte scan)' : 'off') +
       ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
       ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +

