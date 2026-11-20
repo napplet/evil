@@ -24,8 +24,9 @@ attack primitive is available — with masked, non-actionable evidence — and t
 **Detonation rows.** Attacks that prove their primitive by replacing the
 napplet's *own* document (`autoRun: false`, evil-09) never fire in the auto-run
 sweep — the operator clicks DETONATE. The replacement is in-frame only:
-unverified bytes loaded into the same Window (a data: URL, or a same-host
-network target — `harness/replace-target.html` — standing in for the
+unverified bytes loaded into the same Window (a data: URL, or the network
+target the host names in the `evil09-target` run parameter — the harness
+passes its same-host `harness/replace-target.html`, standing in for the
 attacker's server), no egress, no writes. The probe UI dies with the verified
 document by design; reload the napplet from the harness to restore it.
 
@@ -53,7 +54,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 110 automated checks against real
+**All nine rungs are built and validated** — 120 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -110,12 +111,44 @@ every knob re-arms a different subset of the attacks:
   `windowId`/`dTag` fields over `MessageEvent.source` — arms the evil-03 spoof.
 - **launcher** — `safe` (textContent) vs `unsafe` (innerHTML) manifest-metadata
   render — arms the evil-04 shell-origin XSS end to end.
+- **strip referrer** — sets `referrerpolicy="no-referrer"` on the napplet
+  iframe, so `document.referrer` reads empty inside it.
+- **run parameters** — the `evil09-target` field (defaults to this host's
+  `/harness/replace-target.html`; empty = no network target). Handed to the
+  napplet as `window.__EVIL_PARAMS__` in a pre-script on every load, whatever
+  the binding or runtime knobs say. A cleared field is injected as `""`.
 
 It also seeds victim canaries (`nsec` marker in `localStorage`, inherited v1
   secrets per namespace policy, and a per-load `__evil09_victim__` grant seed),
   echoes `evil.ping` with a shell-side wall clock (so frames can measure shell
   starvation), logs every ACCEPTED/DROPPED/REVOKED message, and dumps the
   runtime store.
+
+## Run parameters
+
+Some probes take parameters from the host. `evilParam(name)` in the shared
+chrome returns the first source that names the key:
+
+1. `window.__EVIL_PARAMS__`, an object the host injects pre-script
+2. `<meta name="evil-params" content="k=v&k2=v2">` in the napplet document
+3. the napplet document's own `?query` or `#hash` (URL-served napplets)
+4. `document.baseURI` `?query` or `#hash`. A srcdoc frame inherits the
+   embedding page's URL, but this is best-effort: a host `<base href>` hides it.
+
+A missing key means `null`, and the probe falls back to its documented default.
+A srcdoc host (where the napplet has no URL of its own) can pass parameters in
+three ways. It can inject `<script>window.__EVIL_PARAMS__ = {...}</script>`
+ahead of the napplet's scripts (outside the hashed bytes, like the runtime
+shim), add a `<meta name="evil-params">`, or put them in its own page's
+`#hash`, which reaches the srcdoc through `document.baseURI`.
+
+| Parameter | Probe | Values |
+|---|---|---|
+| `evil09-target` | evil-09 `self-replace` (DETONATE) | absent, empty or `data` → no network target, scheme-local data: replacement · an absolute `http:`/`https:` URL → the frame navigates there, with the stage-2 query (`marker`, `mode`, `csp`, `dTag`, `target_src`) appended · anything else (`javascript:`, `data:…`, relative) → rejected, nothing navigates, the row reads N/A |
+
+evil-09 never reads `document.referrer` to choose its target, and it never
+defaults to an external host. Stage-2 evidence names the target it used and
+where that target came from.
 
 ## Repo layout
 
@@ -130,7 +163,7 @@ harness/
   index.html                          # configurable victim shell
   replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-9].spec.mjs   # 110 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 120 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 

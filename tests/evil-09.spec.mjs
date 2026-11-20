@@ -89,6 +89,56 @@ async function detonate(f) {
   await page.close();
 }
 
+// run parameter evil09-target (napplet/evil#3): the network replacement
+// target comes from the host, never from document.referrer
+{
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
+  const f = await loadHarness(page, { napplet: ID, runtime: true, settleMs: 6000 });
+  const injected = await f.evaluate(() => window.__EVIL_PARAMS__ && window.__EVIL_PARAMS__['evil09-target']);
+  check('param: harness injects window.__EVIL_PARAMS__ evil09-target = the same-host fixture', injected === BASE + '/harness/replace-target.html', String(injected));
+  await detonate(f);
+  const href = await f.evaluate(() => location.origin + location.pathname);
+  check('param supplied: frame navigated to the network target named by evil09-target', href === BASE + '/harness/replace-target.html', href);
+  const ev = await evidence(f, 'replaced-document');
+  check('param supplied: stage-2 evidence names the target and its source (run parameter)', ev.includes('/harness/replace-target.html (from run parameter evil09-target)'), ev.slice(-200));
+  await page.close();
+}
+{
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
+  const f = await loadHarness(page, { napplet: ID, runtime: true, evil09Target: '', settleMs: 6000 });
+  await detonate(f);
+  const st = await statuses(f);
+  const proto = await f.evaluate(() => location.protocol);
+  check('param cleared: no network target — scheme-local data: replacement', proto === 'data:', proto);
+  check('param cleared: data: replacement still carries the marker in its URL', st['url-disclosure'] === 'armed', JSON.stringify(st));
+  const ev = await evidence(f, 'replaced-document');
+  check('param cleared: evidence says the target was scheme-local by host choice', ev.includes('target: scheme-local data: (evil09-target="")'), ev.slice(-160));
+  await page.close();
+}
+{
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
+  const f = await loadHarness(page, { napplet: ID, runtime: true, evil09Target: 'javascript:alert(1)', settleMs: 6000 });
+  await f.locator('.attack[data-attack="self-replace"] button[data-probe]').click();
+  await f.waitForFunction(() => document.querySelector('.attack[data-attack="self-replace"]')?.dataset.status === 'na', null, { timeout: 5000 });
+  await page.waitForTimeout(1500); // past the 800ms fallback watchdog: nothing may navigate
+  const still = await f.evaluate(() => ({ id: window.__EVIL_ID__, keying: !!document.querySelector('.attack[data-attack="window-keying"]'), href: location.href }));
+  check('param invalid scheme: javascript: target REJECTED (na), frame never navigated', still.id === ID && still.keying && still.href === 'about:srcdoc', JSON.stringify(still));
+  const ev = await evidence(f, 'self-replace');
+  check('param invalid scheme: evidence names the rejected value and the reason', ev.includes('rejected evil09-target') && ev.includes('javascript:'), ev.slice(0, 160));
+  await page.close();
+}
+// shell strips the referrer: the probe still uses the param target
+{
+  const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
+  const f = await loadHarness(page, { napplet: ID, runtime: true, noReferrer: true, settleMs: 6000 });
+  const ref = await f.evaluate(() => document.referrer);
+  check('no-referrer: the shell emptied document.referrer for the napplet', ref === '', JSON.stringify(ref));
+  await detonate(f);
+  const href = await f.evaluate(() => location.origin + location.pathname);
+  check('no-referrer: network replacement still reaches the param target (not the data: fallback)', href === BASE + '/harness/replace-target.html', href);
+  await page.close();
+}
+
 // VERY EVIL under window binding: stage-2 poisons the namespace and exfiltrates
 // via the navigation URL — no CSP directive governs a location assignment
 {
