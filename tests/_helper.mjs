@@ -21,7 +21,7 @@ export function makeChecks() {
 }
 
 export async function loadHarness(page, opts = {}) {
-  await page.goto(BASE + '/harness/');
+  await page.goto(BASE + '/harness/' + (opts.hostFrameSrc === 'none' ? '?hostframesrc=none' : ''));
   if (opts.preset) await page.check('input[name="preset"][value="' + opts.preset + '"]');
   if (opts.binding) await page.check('input[name="binding"][value="' + opts.binding + '"]');
   if (opts.csp === false) await page.uncheck('input[name="csp"]');
