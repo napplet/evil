@@ -4,6 +4,7 @@
 // identity to unverified bytes, and the injected meta CSP dies with the verified
 // document. The harness `binding: port` knob is the post-#14 green gate.
 import { chromium, BASE, loadHarness, statuses, makeChecks, armVeryEvil, collectExfil, evidence, shellLogIncludes } from './_helper.mjs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 
 const check = makeChecks();
 const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } });
@@ -107,6 +108,79 @@ async function detonate(f) {
   check('very-evil: window-keying exfil captured (fetch channel, csp off)', fetchExfil);
   check('very-evil: both exfil channels fired (fetch + navigation URL)', exfil.length >= 2, exfil.length + ' requests');
   await page.close();
+}
+
+// Pre-load self-navigation (finding 14, napplet/evil#5 — supports NIP-5D spec
+// change B). A napplet whose FIRST inline script self-navigates replaces its
+// own document BEFORE the frame's first load event fires. Replacement-watch
+// keyed on a second load / second napplet.hello has no baseline to compare
+// against — there was never a first load of the verified document. The
+// data:/blob:/https: target is governed only by the EMBEDDING page's frame
+// navigation policy (frame-src), which a srcdoc shell cannot set to allow the
+// napplet yet deny the self-navigation (Chromium applies host frame-src to the
+// initial srcdoc too — measured). So the runtime-side control that holds is the
+// port binding: a replacement that resorts to window-level NAP is replacement
+// evidence whatever the timing. data: only — no network.
+{
+  const fixtureDir = 'napplets/evil-preload-selfnav';
+  mkdirSync(fixtureDir, { recursive: true });
+  // frame-tag-free; the data: stage-2 does a raw window-level storage.get for
+  // the verified napplet's seed, then reports what it was served.
+  const stage2 = [
+    '(function(){',
+    '  var id="pl-"+Math.random().toString(16).slice(2);',
+    '  var on=function(e){var d=e.data;if(d&&d.id===id){window.removeEventListener("message",on);',
+    '    parent.postMessage({type:"evil.stage2.report",report:{via:"preload-selfnav",served:(d.value!=null?String(d.value):null)}},"*");}};',
+    '  window.addEventListener("message",on);',
+    '  parent.postMessage({type:"storage.get",id:id,key:"__evil09_victim__"},"*");',
+    '  setTimeout(function(){parent.postMessage({type:"evil.stage2.report",report:{via:"preload-selfnav",served:null}},"*");},1500);',
+    '})();',
+  ].join('');
+  const fixture =
+    '<!doctype html><html><head><meta name="napplet-id" content="evil-preload-selfnav"></head><body>\n' +
+    '<script>\n' +
+    'window.__EVIL_ID__="evil-preload-selfnav";\n' +
+    'var gt="<",so=gt+"scr"+"ipt>",sc=gt+"/scr"+"ipt>";\n' +
+    'var inner="<!doctype html>"+so+' + JSON.stringify(stage2) + '+sc;\n' +
+    'location.replace("data:text/html,"+encodeURIComponent(inner));\n' +
+    '</scr' + 'ipt>\n</body></html>\n';
+  writeFileSync(fixtureDir + '/index.html', fixture);
+  try {
+    // window binding: the replacement is served — no first-load baseline
+    {
+      const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+      await page.goto(BASE + '/harness/');
+      await page.check('input[name="runtime"]');
+      await page.evaluate(() => { const s = document.getElementById('nappletSel'); const o = document.createElement('option'); o.value = 'evil-preload-selfnav'; s.appendChild(o); });
+      await page.selectOption('#nappletSel', 'evil-preload-selfnav');
+      await page.click('#loadBtn');
+      await page.waitForTimeout(2500);
+      const log = await page.evaluate(() => (window.__evilLogLines || []).join('\n'));
+      check('preload window-keyed: pre-first-load replacement ACCEPTED — replacement-watch is blind (finding 14)', /ACCEPTED \{"type":"storage.get"/.test(log), log.slice(-240));
+      check('preload window-keyed: the replacement was SERVED the verified seed', /ATTACKER DOCUMENT reported.*INHERITED-BY-EVIL-09/.test(log), (log.match(/ATTACKER DOCUMENT reported.*/) || [''])[0].slice(0, 160));
+      const alive = await page.evaluate(() => { const el = document.getElementById('frame'); return !!el && el.isConnected; });
+      check('preload window-keyed: no teardown — the shell never saw a first load to diff against', alive);
+      await page.close();
+    }
+    // port binding (the green gate): window-level NAP is replacement evidence,
+    // whatever the timing — the replacement is dropped and the frame torn down.
+    {
+      const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+      await page.goto(BASE + '/harness/');
+      await page.check('input[name="runtime"]');
+      await page.check('input[name="binding"][value="port"]');
+      await page.evaluate(() => { const s = document.getElementById('nappletSel'); const o = document.createElement('option'); o.value = 'evil-preload-selfnav'; s.appendChild(o); });
+      await page.selectOption('#nappletSel', 'evil-preload-selfnav');
+      await page.click('#loadBtn');
+      await page.waitForTimeout(2500);
+      const log = await page.evaluate(() => (window.__evilLogLines || []).join('\n'));
+      check('preload port-bound: replacement REVOKED despite the pre-load timing (green gate holds)', /REVOKED identity/.test(log), log.slice(-260));
+      check('preload port-bound: the replacement was NOT served the seed', !/INHERITED-BY-EVIL-09/.test(log), log.slice(-200));
+      await page.close();
+    }
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
 }
 
 await browser.close();

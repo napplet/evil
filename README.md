@@ -53,7 +53,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 104 automated checks against real
+**All nine rungs are built and validated** — 109 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -127,7 +127,7 @@ harness/
   index.html                          # configurable victim shell
   replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-9].spec.mjs   # 95 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 109 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 

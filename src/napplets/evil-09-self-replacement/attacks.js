@@ -17,6 +17,11 @@ window.__EVIL_KIT__ = [
     note: 'Any frame can navigate ITSELF — no sandbox token and no CSP fetch directive restricts it. In a Window-keyed shell the reply arrives carrying the verified napplet\'s grants: unverified bytes reading verified data. The injected meta CSP does not apply to the navigated document.',
     data: 'location.replace(\'data:text/html,<script>window.parent.postMessage({type:"storage.get",id:"repro",key:"victim-key"}, "*")<\\/script>\');',
   },
+  {
+    label: 'pre-load self-navigation (replacement before the first load — napplet/evil#5)',
+    note: 'Put this as the napplet\'s FIRST inline script: it self-navigates to data:/blob:/https: before the frame ever fires a first load event. A shell whose replacement-watch keys on a second load or a second napplet.hello has no baseline — there was never a first load of the verified document to diff against, so the replacement is simply the first thing the shell sees. The target scheme is governed only by the EMBEDDING page\'s frame navigation policy (frame-src), not by the napplet\'s own CSP; a srcdoc shell cannot set host frame-src to permit the napplet yet deny this jump. The control that holds is binding identity to the handed-over port and treating any post-handoff window-level NAP as replacement evidence (harness identity binding: port), whatever the timing.',
+    data: 'location.replace(\'data:text/html,<script>window.parent.postMessage({type:"storage.get",id:"preload",key:"victim-key"}, "*")<\\/script>\'); /* runs during initial parse — before this document\'s load event */',
+  },
 ];
 
 /* ---------- stage-2: the unverified replacement document ---------- */
