@@ -25,6 +25,12 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   check('spec: WebRTC DATA CHANNEL ARMS — no CSP directive covers it (spec gap)', st['webrtc'] === 'armed', st['webrtc']);
   check('spec: WebRTC GRANDCHILD ARMS — fresh nested realm, no CSP directive reaches it (kehto/web#381)', st['webrtc-grandchild'] === 'armed', st['webrtc-grandchild']);
   check('spec: prefetch hint unverifiable (na)', st['prefetch-hint'] === 'na');
+  // finding 13: the XML-parser sinks mint fresh contexts too, with no factory
+  // pin or TT layer engaged (spec preset has no lock) — all three minted.
+  const gcEv = await evidence(f, 'webrtc-grandchild');
+  check('spec: XSLT transformToFragment mints a nested context (finding 13)', /XSLT transformToFragment: minted/.test(gcEv), gcEv.slice(-260));
+  check('spec: XML-namespace DOMParser+adopt mints a nested context (finding 13)', /XHTML DOMParser\+adopt: minted/.test(gcEv), gcEv.slice(-200));
+  check('spec: DTD-entity XML mints a nested context (finding 13)', /DTD-entity XML: minted/.test(gcEv), gcEv.slice(-160));
   await page.close();
 }
 
@@ -51,7 +57,12 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   const len = await f.evaluate(() => window.length);
   check('lock: window.length 0 across the whole bypass battery', len === 0, String(len));
   const ev = await evidence(f, 'webrtc-grandchild');
-  check('lock: evidence records the per-vector denials (TT sinks + factory pins)', /DENIED/.test(ev) && /16 battery vectors/.test(ev), ev.slice(0, 220));
+  check('lock: evidence records the per-vector denials (TT sinks + factory pins + XML scan)', /DENIED/.test(ev) && /19 battery vectors/.test(ev), ev.slice(0, 220));
+  // finding 13: layer 4 (adoptNode/transformToFragment output scan) closes the
+  // XML-parser sinks that factory pins + TT do not reach.
+  check('lock: XSLT transformToFragment DENIED by the output scan (finding 13)', /XSLT transformToFragment: DENIED \(TypeError: nested browsing contexts are locked: xslt frame node/.test(ev), ev.slice(-280));
+  check('lock: XML-namespace DOMParser+adopt DENIED by the output scan (finding 13)', /XHTML DOMParser\+adopt: DENIED \(TypeError: nested browsing contexts are locked: xml-parser frame node/.test(ev), ev.slice(-200));
+  check('lock: DTD-entity XML DENIED by the output scan (finding 13)', /DTD-entity XML: DENIED \(TypeError: nested browsing contexts are locked: xml-parser frame node/.test(ev), ev.slice(-140));
   const tt = await f.evaluate(() => String(window.__evilLockTT));
   check('lock: TT default policy registered in the napplet realm', tt === 'default policy registered', tt);
   check('lock: top-realm webrtc unaffected (the lock prevents contexts, it does not neuter RTC)', st['webrtc'] === 'armed', st['webrtc']);
