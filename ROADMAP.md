@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 109 automated checks against real
+**All nine rungs are built and validated** — 114 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -212,7 +212,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 29/29 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 34/34 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
@@ -263,10 +263,13 @@ Validated results:
   it is `REVOKED` all the same, because post-handoff window-level NAP is
   replacement evidence whatever the timing — so the port binding is the gate.
   The target scheme (data:/blob:/https:) is governed only by the *embedding
-  page's* frame navigation policy (`frame-src`), not the napplet's own CSP;
-  measured that Chromium applies host `frame-src` to the initial srcdoc load
-  too, so a srcdoc shell cannot set it to permit the napplet yet deny the
-  self-navigation. CI-gated both ways (`tests/evil-09.spec.mjs`).
+  page's* frame navigation policy, not the napplet's own CSP — and that is the
+  second gate: the harness `host frame-src 'none'` knob (`?hostframesrc=none`)
+  puts `frame-src 'none'` on the embedding page; the shell's srcdoc napplet still
+  loads and runs, but the pre-load self-navigation to data: or http(s): is
+  blocked (`HOST CSP BLOCKED frame-src`, no request reaches the target) even
+  under window binding. Without it the http(s) navigation lands. All paths
+  CI-gated (`tests/evil-09.spec.mjs`).
 
 | # | Attack | Spec clause |
 |---|--------|-------------|
@@ -347,11 +350,13 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     and served the verified napplet's seed with no teardown; under the post-#14
     port binding it is `REVOKED` all the same, because treating any post-handoff
     window-level NAP as replacement evidence is timing-independent — that, not
-    load-counting, is the control that holds. The target scheme is governed only
-    by the *embedding page's* frame navigation policy; Chromium applies host
-    `frame-src` to the initial srcdoc load too, so a srcdoc shell cannot set
-    `frame-src` to permit the napplet yet deny the self-navigation (measured —
-    an open question for the embedding-page CSP recommendation). Validated by
-    evil-09's pre-load fixture (window serves / port revokes, both CI-gated);
+    load-counting, is one control that holds. The other is the *embedding
+    page's* frame navigation policy, which alone governs the target scheme: an
+    embedding-page `frame-src 'none'` leaves the shell's srcdoc napplet loading
+    normally but blocks its pre-load self-navigation to data: or http(s):
+    (measured in Chromium here; Chromium 147, Firefox 148.0.2, WebKit 26.4 per
+    the independent re-measurement). Validated by evil-09's pre-load fixture
+    (window serves / port revokes / host `frame-src 'none'` blocks, all
+    CI-gated);
     repro in the evil-09 kit. Supports the NIP-5D proposal that replacement
     evidence cannot be keyed on the first `load`. (napplet/evil#5)

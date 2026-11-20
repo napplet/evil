@@ -114,13 +114,11 @@ async function detonate(f) {
 // change B). A napplet whose FIRST inline script self-navigates replaces its
 // own document BEFORE the frame's first load event fires. Replacement-watch
 // keyed on a second load / second napplet.hello has no baseline to compare
-// against — there was never a first load of the verified document. The
-// data:/blob:/https: target is governed only by the EMBEDDING page's frame
-// navigation policy (frame-src), which a srcdoc shell cannot set to allow the
-// napplet yet deny the self-navigation (Chromium applies host frame-src to the
-// initial srcdoc too — measured). So the runtime-side control that holds is the
-// port binding: a replacement that resorts to window-level NAP is replacement
-// evidence whatever the timing. data: only — no network.
+// against — there was never a first load of the verified document. Two controls
+// hold: the port binding (window-level NAP from the replacement is replacement
+// evidence whatever the timing) and the EMBEDDING page's `frame-src 'none'`
+// (harness ?hostframesrc=none), which still lets the shell's srcdoc napplet
+// load but blocks the frame navigating itself to data:/http(s):.
 {
   const fixtureDir = 'napplets/evil-preload-selfnav';
   mkdirSync(fixtureDir, { recursive: true });
@@ -136,15 +134,34 @@ async function detonate(f) {
     '  setTimeout(function(){parent.postMessage({type:"evil.stage2.report",report:{via:"preload-selfnav",served:null}},"*");},1500);',
     '})();',
   ].join('');
-  const fixture =
-    '<!doctype html><html><head><meta name="napplet-id" content="evil-preload-selfnav"></head><body>\n' +
+  const fixtureFor = (id, targetExpr) =>
+    '<!doctype html><html><head><meta name="napplet-id" content="' + id + '"></head><body>\n' +
     '<script>\n' +
-    'window.__EVIL_ID__="evil-preload-selfnav";\n' +
+    'window.__EVIL_ID__="' + id + '";\n' +
     'var gt="<",so=gt+"scr"+"ipt>",sc=gt+"/scr"+"ipt>";\n' +
     'var inner="<!doctype html>"+so+' + JSON.stringify(stage2) + '+sc;\n' +
-    'location.replace("data:text/html,"+encodeURIComponent(inner));\n' +
+    'location.replace(' + targetExpr + ');\n' +
     '</scr' + 'ipt>\n</body></html>\n';
-  writeFileSync(fixtureDir + '/index.html', fixture);
+  writeFileSync(fixtureDir + '/index.html', fixtureFor('evil-preload-selfnav', '"data:text/html,"+encodeURIComponent(inner)'));
+  // http(s) variant: the realistic attacker-page target (same-host stand-in)
+  const httpDir = 'napplets/evil-preload-selfnav-http';
+  mkdirSync(httpDir, { recursive: true });
+  writeFileSync(httpDir + '/index.html', fixtureFor('evil-preload-selfnav-http', '"' + BASE + '/harness/preload-landed"'));
+  async function runPreload(id, opts) {
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    await page.goto(BASE + '/harness/' + (opts.hostFrameSrc ? '?hostframesrc=none' : ''));
+    await page.check('input[name="runtime"]');
+    if (opts.binding === 'port') await page.check('input[name="binding"][value="port"]');
+    await page.evaluate((v) => { const s = document.getElementById('nappletSel'); const o = document.createElement('option'); o.value = v; s.appendChild(o); }, id);
+    await page.selectOption('#nappletSel', id);
+    const landed = [];
+    page.on('request', (r) => { if (r.url().includes('/harness/preload-landed')) landed.push(r.url()); });
+    await page.click('#loadBtn');
+    await page.waitForTimeout(2500);
+    const log = await page.evaluate(() => (window.__evilLogLines || []).join('\n'));
+    await page.close();
+    return { log, landed };
+  }
   try {
     // window binding: the replacement is served — no first-load baseline
     {
@@ -178,8 +195,28 @@ async function detonate(f) {
       check('preload port-bound: the replacement was NOT served the seed', !/INHERITED-BY-EVIL-09/.test(log), log.slice(-200));
       await page.close();
     }
+    // embedding-page frame-src 'none' (the host-CSP green gate): the srcdoc
+    // napplet still loads, but its pre-load self-navigation is blocked.
+    {
+      const r = await runPreload('evil-preload-selfnav', { binding: 'window', hostFrameSrc: true });
+      check('preload host frame-src none: data: self-navigation BLOCKED by the embedding page CSP', /HOST CSP BLOCKED frame-src/.test(r.log), r.log.slice(-260));
+      check('preload host frame-src none: no replacement served, even under window binding', !/ACCEPTED \{"type":"storage.get"/.test(r.log) && !/INHERITED-BY-EVIL-09/.test(r.log), r.log.slice(-200));
+      const h = await runPreload('evil-preload-selfnav-http', { binding: 'window', hostFrameSrc: true });
+      check('preload host frame-src none: http(s) self-navigation BLOCKED — no request leaves for the target', /HOST CSP BLOCKED frame-src/.test(h.log) && h.landed.length === 0, h.landed.join(',') + ' :: ' + h.log.slice(-160));
+      const c = await runPreload('evil-preload-selfnav-http', { binding: 'window', hostFrameSrc: false });
+      check('preload control (no host CSP): the http(s) self-navigation DOES reach the target', c.landed.length > 0, c.log.slice(-160));
+    }
+    // the shell's own srcdoc napplet still loads under host frame-src 'none'
+    {
+      const page = await browser.newPage({ viewport: { width: 1600, height: 1200 } });
+      const f = await loadHarness(page, { napplet: ID, runtime: true, hostFrameSrc: 'none', settleMs: 6000 });
+      const st = await statuses(f);
+      check('host frame-src none: the verified srcdoc napplet still loads and runs its probes', st['window-keying'] === 'armed', JSON.stringify(st));
+      await page.close();
+    }
   } finally {
     rmSync(fixtureDir, { recursive: true, force: true });
+    rmSync('napplets/evil-preload-selfnav-http', { recursive: true, force: true });
   }
 }
 
