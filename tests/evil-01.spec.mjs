@@ -37,7 +37,12 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   const held = ['real-origin', 'shared-storage', 'service-worker', 'parent-dom', 'nip07', 'parent-nav', 'popup'];
   check('spec: escape probes all held', held.every(id => st[id] === 'blocked'), JSON.stringify(st));
   // Spec-gap findings (ROADMAP #2, #3): these arm even in a compliant runtime.
-  check('spec: referrer leaks shell URL (ROADMAP #2)', st['referrer'] === 'armed', st['referrer']);
+  check('spec: embedding-URL leaks into the frame (ROADMAP #2)', st['referrer'] === 'armed', st['referrer']);
+  // finding 2 correction: referrer is not the only channel — baseURI (full
+  // embedding URL, no Referrer-Policy over it) and ancestorOrigins also leak.
+  const refEv = await (await evilFrame(page)).evaluate(() => document.querySelector('.attack[data-attack="referrer"] .evidence').textContent);
+  check('spec: embedding-URL leak names document.baseURI (finding 2 correction)', /document\.baseURI=/.test(refEv), refEv.slice(0, 200));
+  check('spec: embedding-URL leak names location.ancestorOrigins', /ancestorOrigins/.test(refEv), refEv.slice(0, 200));
   check('spec: sibling-enum n/a without siblings', st['sibling-enum'] === 'na', st['sibling-enum']);
   const summary = await (await evilFrame(page)).locator('#summary').innerText();
   check('spec: exactly 1 armed (the referrer spec gap)', /1 armed/.test(summary), summary);

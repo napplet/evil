@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 122 automated checks against real
+**All nine rungs are built and validated** — 137 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -14,16 +14,22 @@ job is to show what each mistake costs, with a real payload behind the gate.
 
 ### ✅ `evil-01-sandbox-escape` — the load-bearing preconditions
 
-Status: **built + validated** — 16/16 (`tests/evil-01.spec.mjs`)
+Status: **built + validated** — 18/18 (`tests/evil-01.spec.mjs`)
 
 Validated results:
 
 - **spec-compliant runtime holds every escape probe** (origin, storage, SW,
   parent DOM, NIP-07, navigation, popups) — the suite is a runtime CI gate.
-- **spec gap confirmed (findings #2):** `document.referrer` inside the srcdoc
-  frame is the shell URL even in the fully compliant preset. No NIP-5D guidance
-  on Referrer-Policy exists; shells should inject `no-referrer` policy — but a
-  meta in the artifact runs counter to the hashed-bytes rule, so this needs
+- **spec gap confirmed (findings #2):** the embedding URL leaks into the srcdoc
+  frame three ways in the fully compliant preset — `document.referrer` (the
+  shell URL), `document.baseURI` (the FULL embedding URL incl path/query/fragment
+  for srcdoc), and `location.ancestorOrigins` (the embedding origin). No NIP-5D
+  guidance on Referrer-Policy exists, and `no-referrer` only closes *one* of the
+  three: a no-referrer iframe attr empties `document.referrer` (Chromium,
+  Firefox; WebKit 26.4 ignores it for srcdoc) and a host `<meta name="referrer"
+  content="no-referrer">` works in all three — but neither touches `baseURI`,
+  which only a host-page `<base href>` changes, nor `ancestorOrigins`. A meta in
+  the artifact also runs counter to the hashed-bytes rule, so this needs
   spec-level thought.
 - **refinement:** `allow-same-origin` alone does **not** grant ancestor
   navigation — the browser's sandbox navigation flag held
@@ -43,7 +49,7 @@ Attacks every *must* in [NIP-5D §Security](../napplets/evil-01-sandbox-escape/i
 | 4 | Parent DOM read (cookies, rendered secrets) | "The shell is trusted; the napplet is not" |
 | 5 | Ambient `window.nostr` — sign as the user | "Shells MUST NOT provide `window.nostr`" |
 | 6 | Parent navigation — shell hijack | sandbox must not permit ancestor navigation |
-| 7 | `document.referrer` leak of the shell URL | *spec is silent — findings #2* |
+| 7 | embedding-URL leak (`referrer` / `baseURI` / `ancestorOrigins`) | *spec is silent — findings #2* |
 | 8 | Popup escape via `window.open` | sandbox must not permit popups |
 | 9 | Sibling napplet enumeration (`parent.length`) | *cross-origin-legal even in compliant runtimes — findings #3* |
 
@@ -52,7 +58,7 @@ NIP-07 extension injecting `window.nostr` into iframes (all_frames).
 
 ### ✅ `evil-02-csp-egress` — CSP & network egress
 
-Status: **built + validated** — 31/31 (`tests/evil-02.spec.mjs`)
+Status: **built + validated** — 34/34 (`tests/evil-02.spec.mjs`)
 
 `connect-src 'none'` is the only thing between an opaque-origin frame and the
 network (a srcdoc iframe has no HTTP response to carry a CSP *header*).
@@ -103,8 +109,18 @@ Validated results:
   an output scan on `adoptNode`/`importNode`/`transformToFragment` — closes
   them. Measured minting in Chromium 147, Firefox 148, WebKit 26.4; CI-gated
   both ways (lock OFF → minted, lock ON → DENIED by the output scan).
-- Prefetch / dns-prefetch hint loads are unverifiable from inside the frame —
-  honest `na` ("treat the channel as open"): no directive governs them either.
+- **Resource hints are not reliably governed by `default-src 'none'` (findings
+  #15, napplet/evil#5).** The `resource-hints` row inserts prefetch,
+  dns-prefetch, preconnect and prerender; all four are unverifiable from inside
+  the frame (no violation/load/error event), so demo mode is honest `na`. The
+  **local-sink mode** observes the egress out-of-frame instead of assuming it:
+  pointed at a local HTTP sink on the real Chromium channel, `prerender` issues a
+  real HTTP GET carrying `Sec-Purpose: prefetch` even under the napplet's
+  `default-src 'none'` CSP — a browser non-conformance against CSP3 ED
+  (`w3c/webappsec-csp@e3461f7`, which places these under `default-src`). CI-gated
+  in `tests/evil-02.spec.mjs`; Playwright's default bundled build fires no hints,
+  so the gate uses `channel: 'chromium'` + `--enable-features=NetworkPrediction`
+  and degrades to a capability note where that channel is absent.
 
 ## Tier 1 — transport confusion (lazy runtimes)
 
@@ -233,7 +249,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 30/30 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 40/40 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
@@ -274,6 +290,23 @@ Validated results:
   namespace (`__evil09_poison__` for the next legit load to inherit) and
   exfiltrated the seed to the collector via the navigation URL — two egress
   channels, end to end.
+- **Pre-load self-navigation (findings #14, napplet/evil#5)**: a napplet whose
+  FIRST inline script self-navigates replaces its own document *before the
+  frame's first load event fires*. Replacement-watch keyed on a second load or a
+  second `napplet.hello` has no baseline — there was never a first load of the
+  verified document to diff against. Measured with a pre-load fixture: under
+  window binding the data: replacement's raw window-level `storage.get` is
+  ACCEPTED and served the verified seed with no teardown; under the port binding
+  it is `REVOKED` all the same, because post-handoff window-level NAP is
+  replacement evidence whatever the timing — so the port binding is the gate.
+  The target scheme (data:/blob:/https:) is governed only by the *embedding
+  page's* frame navigation policy, not the napplet's own CSP — and that is the
+  second gate: the harness `host frame-src 'none'` knob (`?hostframesrc=none`)
+  puts `frame-src 'none'` on the embedding page; the shell's srcdoc napplet still
+  loads and runs, but the pre-load self-navigation to data: or http(s): is
+  blocked (`HOST CSP BLOCKED frame-src`, no request reaches the target) even
+  under window binding. Without it the http(s) navigation lands. All paths
+  CI-gated (`tests/evil-09.spec.mjs`).
 
 | # | Attack | Spec clause |
 |---|--------|-------------|
@@ -296,8 +329,18 @@ Research notes for spec issues (to file upstream as the napplets validate them):
 1. ✅ **WebRTC is outside CSP** — no directive governs `RTCPeerConnection`; the
    conservative baseline still allows data-channel egress (validated by
    evil-02).
-2. ✅ **No Referrer-Policy guidance** — a srcdoc napplet inherits the shell URL
-   as `document.referrer`, in a compliant runtime (validated by evil-01/07).
+2. ✅ **No Referrer-Policy guidance, and referrer is not the only channel** — a
+   srcdoc napplet inherits the embedding URL/origin in a compliant runtime via
+   three channels, not one: `document.referrer` (the shell URL),
+   `document.baseURI` (the FULL embedding URL incl path/query/fragment for
+   srcdoc), and `location.ancestorOrigins` (the embedding origin, where
+   supported — Chromium/WebKit yes, Firefox no). Measured (Kehto Playwright
+   probes): a no-referrer iframe attr empties `document.referrer` in Chromium
+   and Firefox but **WebKit 26.4 ignores it for srcdoc**; a host-page `<meta
+   name="referrer" content="no-referrer">` empties it in all three. Neither
+   touches `baseURI` — only a host-page `<base href>` changes it — nor
+   `ancestorOrigins`. So `no-referrer` guidance alone is insufficient; the spec
+   should address `baseURI`/`ancestorOrigins` too (validated by evil-01/07).
 3. ✅ **Cross-origin window accessibles** — `parent.length`/`parent.frames.length`
    are readable from an opaque-origin napplet → sibling enumeration channel
    (validated by evil-01/07).
@@ -364,3 +407,47 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     with the harness `nested-context lock` the green gate (arms off / holds on,
     both CI-gated). Supports treating `window.length > 0` as nested-context /
     replacement evidence at the spec level.
+14. ✅ **Replacement-watch is blind to a pre-first-load self-navigation** — a
+    napplet whose first inline script navigates the frame to data:/blob:/https:
+    replaces its own document before the frame ever fires a first load event, so
+    a shell that detects replacement by counting loads or waiting for a second
+    `napplet.hello` has no baseline to diff against. Measured: under window
+    binding the data: replacement's raw window-level `storage.get` is ACCEPTED
+    and served the verified napplet's seed with no teardown; under the post-#14
+    port binding it is `REVOKED` all the same, because treating any post-handoff
+    window-level NAP as replacement evidence is timing-independent — that, not
+    load-counting, is one control that holds. The other is the *embedding
+    page's* frame navigation policy, which alone governs the target scheme: an
+    embedding-page `frame-src 'none'` leaves the shell's srcdoc napplet loading
+    normally but blocks its pre-load self-navigation to data: or http(s):
+    (measured in Chromium here; Chromium 147, Firefox 148.0.2, WebKit 26.4 per
+    the independent re-measurement). Validated by evil-09's pre-load fixture
+    (window serves / port revokes / host `frame-src 'none'` blocks, all
+    CI-gated);
+    repro in the evil-09 kit. Supports the NIP-5D proposal that replacement
+    evidence cannot be keyed on the first `load`. (napplet/evil#5)
+15. ✅ **Resource hints are not reliably governed by `default-src 'none'`** — a
+    srcdoc napplet under the spec baseline can still reach the network through
+    `<link rel>` resource hints, which no fetch directive observes and which
+    CSP3 ED (`w3c/webappsec-csp@e3461f7`) places under `default-src` — so a
+    browser that lets them through under `default-src 'none'` is non-conformant.
+    From inside the frame the loads are unverifiable (no violation/load/error
+    event); the local-sink mode observes them out-of-frame. Measured per engine
+    (Kehto Playwright probes; prerender reconfirmed on the Chromium channel in
+    `tests/evil-02.spec.mjs`):
+
+    | hint | Chromium 147 | Firefox 148 | WebKit 26.4 |
+    |------|--------------|-------------|-------------|
+    | `rel=prerender` | HTTP GET, `Sec-Purpose: prefetch` | — | — |
+    | `rel=preconnect` | DNS + TCP (network prediction on) | — | TCP |
+    | `rel=dns-prefetch` | DNS (network prediction on) | DNS (DNS prefetch enabled) | — |
+    | `rel=prefetch` | governed by `default-src` here (CSP violation) | — | — |
+
+    A dash is "not observed in that engine/config", not "closed" — these are
+    prediction/flag-gated and build-dependent, which is itself the point: the
+    napplet CSP is not the control. Playwright's default context disables network
+    prediction, so preconnect/dns-prefetch need the real browser channel with
+    prediction enabled; prerender's HTTP GET fires regardless and is the CI
+    anchor. Closing this needs an embedding-page / Permissions-Policy control or
+    a CSP directive the browser actually enforces for hints — a spec gap for the
+    NIP-5D CSP advisory (C/D/E). (napplet/evil#5)
