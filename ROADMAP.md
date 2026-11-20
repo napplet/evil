@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 123 automated checks against real
+**All nine rungs are built and validated** — 125 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -14,16 +14,22 @@ job is to show what each mistake costs, with a real payload behind the gate.
 
 ### ✅ `evil-01-sandbox-escape` — the load-bearing preconditions
 
-Status: **built + validated** — 16/16 (`tests/evil-01.spec.mjs`)
+Status: **built + validated** — 18/18 (`tests/evil-01.spec.mjs`)
 
 Validated results:
 
 - **spec-compliant runtime holds every escape probe** (origin, storage, SW,
   parent DOM, NIP-07, navigation, popups) — the suite is a runtime CI gate.
-- **spec gap confirmed (findings #2):** `document.referrer` inside the srcdoc
-  frame is the shell URL even in the fully compliant preset. No NIP-5D guidance
-  on Referrer-Policy exists; shells should inject `no-referrer` policy — but a
-  meta in the artifact runs counter to the hashed-bytes rule, so this needs
+- **spec gap confirmed (findings #2):** the embedding URL leaks into the srcdoc
+  frame three ways in the fully compliant preset — `document.referrer` (the
+  shell URL), `document.baseURI` (the FULL embedding URL incl path/query/fragment
+  for srcdoc), and `location.ancestorOrigins` (the embedding origin). No NIP-5D
+  guidance on Referrer-Policy exists, and `no-referrer` only closes *one* of the
+  three: a no-referrer iframe attr empties `document.referrer` (Chromium,
+  Firefox; WebKit 26.4 ignores it for srcdoc) and a host `<meta name="referrer"
+  content="no-referrer">` works in all three — but neither touches `baseURI`,
+  which only a host-page `<base href>` changes, nor `ancestorOrigins`. A meta in
+  the artifact also runs counter to the hashed-bytes rule, so this needs
   spec-level thought.
 - **refinement:** `allow-same-origin` alone does **not** grant ancestor
   navigation — the browser's sandbox navigation flag held
@@ -43,7 +49,7 @@ Attacks every *must* in [NIP-5D §Security](../napplets/evil-01-sandbox-escape/i
 | 4 | Parent DOM read (cookies, rendered secrets) | "The shell is trusted; the napplet is not" |
 | 5 | Ambient `window.nostr` — sign as the user | "Shells MUST NOT provide `window.nostr`" |
 | 6 | Parent navigation — shell hijack | sandbox must not permit ancestor navigation |
-| 7 | `document.referrer` leak of the shell URL | *spec is silent — findings #2* |
+| 7 | embedding-URL leak (`referrer` / `baseURI` / `ancestorOrigins`) | *spec is silent — findings #2* |
 | 8 | Popup escape via `window.open` | sandbox must not permit popups |
 | 9 | Sibling napplet enumeration (`parent.length`) | *cross-origin-legal even in compliant runtimes — findings #3* |
 
@@ -317,8 +323,18 @@ Research notes for spec issues (to file upstream as the napplets validate them):
 1. ✅ **WebRTC is outside CSP** — no directive governs `RTCPeerConnection`; the
    conservative baseline still allows data-channel egress (validated by
    evil-02).
-2. ✅ **No Referrer-Policy guidance** — a srcdoc napplet inherits the shell URL
-   as `document.referrer`, in a compliant runtime (validated by evil-01/07).
+2. ✅ **No Referrer-Policy guidance, and referrer is not the only channel** — a
+   srcdoc napplet inherits the embedding URL/origin in a compliant runtime via
+   three channels, not one: `document.referrer` (the shell URL),
+   `document.baseURI` (the FULL embedding URL incl path/query/fragment for
+   srcdoc), and `location.ancestorOrigins` (the embedding origin, where
+   supported — Chromium/WebKit yes, Firefox no). Measured (Kehto Playwright
+   probes): a no-referrer iframe attr empties `document.referrer` in Chromium
+   and Firefox but **WebKit 26.4 ignores it for srcdoc**; a host-page `<meta
+   name="referrer" content="no-referrer">` empties it in all three. Neither
+   touches `baseURI` — only a host-page `<base href>` changes it — nor
+   `ancestorOrigins`. So `no-referrer` guidance alone is insufficient; the spec
+   should address `baseURI`/`ancestorOrigins` too (validated by evil-01/07).
 3. ✅ **Cross-origin window accessibles** — `parent.length`/`parent.frames.length`
    are readable from an opaque-origin napplet → sibling enumeration channel
    (validated by evil-01/07).
