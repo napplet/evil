@@ -25,6 +25,17 @@ async function detonate(f) {
   check('window-keyed: detonation row READY — armed by construction, never auto-run', st['self-replace'] === 'ready');
   const ev = await evidence(f, 'window-keying');
   check('window-keyed: evidence names the Window mapping', ev.includes('WINDOW-LEVEL') && ev.includes('Window'), ev.slice(0, 160));
+  {
+    // NAP-STORAGE (napplet/naps#3): the probes must exercise getItem/keys, not the pre-spec get/set/remove
+    const api = await f.evaluate(async () => {
+      const s = window.napplet.storage;
+      return { getItem: typeof s.getItem, keys: typeof s.keys, legacyGet: typeof s.get, miss: await s.getItem('__absent__' + Math.random()), listed: await s.keys() };
+    });
+    check('window-keyed: injected storage is NAP-STORAGE shaped (getItem/keys, no legacy get)', api.getItem === 'function' && api.keys === 'function' && api.legacyGet === 'undefined', JSON.stringify(api));
+    check('window-keyed: getItem on a missing key resolves null; keys() lists the seeded key', api.miss === null && Array.isArray(api.listed) && api.listed.includes('__evil06_seeded__'), JSON.stringify(api));
+    const ev = (await Promise.all(['window-keying'].map((id) => evidence(f, id)))).join(' | ');
+    check('window-keyed: storage rows ran on the spec API (no "is not a function", no pre-spec na)', !/is not a function|not NAP-STORAGE shaped/.test(ev), ev.slice(0, 200));
+  }
   await page.close();
 }
 
@@ -72,6 +83,17 @@ async function detonate(f) {
   const ev = await evidence(f, 'window-keying');
   check('port-bound: evidence names the port handoff', ev.toLowerCase().includes('port'), ev.slice(0, 160));
   check('port-bound: verified document was port-bound (HELLO accepted)', await shellLogIncludes(page, 'HELLO accepted'));
+  {
+    // NAP-STORAGE (napplet/naps#3): the probes must exercise getItem/keys, not the pre-spec get/set/remove
+    const api = await f.evaluate(async () => {
+      const s = window.napplet.storage;
+      return { getItem: typeof s.getItem, keys: typeof s.keys, legacyGet: typeof s.get, miss: await s.getItem('__absent__' + Math.random()), listed: await s.keys() };
+    });
+    check('port-bound: injected storage is NAP-STORAGE shaped (getItem/keys, no legacy get)', api.getItem === 'function' && api.keys === 'function' && api.legacyGet === 'undefined', JSON.stringify(api));
+    check('port-bound: getItem on a missing key resolves null; keys() lists the seeded key', api.miss === null && Array.isArray(api.listed) && api.listed.includes('__evil06_seeded__'), JSON.stringify(api));
+    const ev = (await Promise.all(['window-keying'].map((id) => evidence(f, id)))).join(' | ');
+    check('port-bound: storage rows ran on the spec API (no "is not a function", no pre-spec na)', !/is not a function|not NAP-STORAGE shaped/.test(ev), ev.slice(0, 200));
+  }
   await page.close();
 }
 

@@ -150,13 +150,23 @@ function stage2Html(cfg) {
   ].join('\n');
 }
 
+// NAP-STORAGE (napplet/naps#3) names the injected methods getItem/setItem/
+// removeItem/keys (getItem → null on a miss). A shell exposing only the
+// pre-spec get/set/remove gets an explicit na naming that shape instead of a
+// TypeError mid-probe; the wire (storage.get/.set/.remove/.keys) is unchanged.
+function preSpecStorage(st) {
+  if (typeof st.getItem === 'function') return null;
+  const legacy = ['get', 'set', 'remove'].filter((k) => typeof st[k] === 'function');
+  return 'storage domain is not NAP-STORAGE shaped (no getItem' + (legacy.length ? '; pre-spec ' + legacy.join('/') + ' only' : '') + ') — probe not run';
+}
+
 async function detonate(mode) {
   // data this napplet was LEGITIMATELY given (through the injected domain)
   let seed = null;
   const st = window.napplet && window.napplet.storage;
-  if (st) {
+  if (st && !preSpecStorage(st)) {
     try {
-      const v = await withTimeout(st.get('__evil09_victim__'), 2000);
+      const v = await withTimeout(st.getItem('__evil09_victim__'), 2000);
       if (v && v !== 'timeout' && !v.__rejected) seed = String(v);
     } catch (_) { /* no seed readable */ }
   }
@@ -218,6 +228,8 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected NAP domain — no transport to observe');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       // passive transport sniff: ride a NORMAL storage roundtrip through the
       // injected namespace and watch whether the reply envelope arrives at
       // this window (pre-#14 window-level postMessage) or over a dedicated
@@ -234,7 +246,7 @@ const ATTACKS = [
         };
         window.addEventListener('message', on);
         let gotValue = null;
-        Promise.resolve(st.get('__evil09_victim__')).then(
+        Promise.resolve(st.getItem('__evil09_victim__')).then(
           (v) => { gotValue = v; setTimeout(() => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve(null); } }, 80); },
           () => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve(null); } }
         );
@@ -248,9 +260,9 @@ const ATTACKS = [
     async evil() {
       const out = {};
       const st = window.napplet && window.napplet.storage;
-      if (st) {
+      if (st && !preSpecStorage(st)) {
         try {
-          const v = await withTimeout(st.get('__evil09_victim__'), 2000);
+          const v = await withTimeout(st.getItem('__evil09_victim__'), 2000);
           if (v && v !== 'timeout' && !v.__rejected) out.victimSeed = String(v);
         } catch (e) { out.getError = errMsg(e); }
       }

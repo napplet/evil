@@ -22,7 +22,8 @@ const ATTACKS = [
       });
       const r = await waitForMsg(id, 1600);
       if (r === 'timeout') return blocked('no reply — router did not service the request at all');
-      if (r.error) return blocked('routed to MY OWN namespace (reply error: ' + r.error + ') — router binds to MessageEvent.source, declared fields ignored: held');
+      // NAP-STORAGE: a miss is value null (pre-spec shells sent an error) — either means my own, empty namespace
+      if (r.error || r.value == null) return blocked('routed to MY OWN namespace (' + (r.error ? 'reply error: ' + r.error : 'value null: trap key absent there') + ') — router binds to MessageEvent.source, declared fields ignored: held');
       return armed('router returned a value from the DECLARED sibling namespace (' + mask(r.value, 20) + ') — envelope identity fields are TRUSTED over MessageEvent.source: any frame can act as any napplet');
     },
     async evil() {
