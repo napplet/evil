@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 104 automated checks against real
+**All nine rungs are built and validated** — 110 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -52,7 +52,7 @@ NIP-07 extension injecting `window.nostr` into iframes (all_frames).
 
 ### ✅ `evil-02-csp-egress` — CSP & network egress
 
-Status: **built + validated** — 25/25 (`tests/evil-02.spec.mjs`)
+Status: **built + validated** — 31/31 (`tests/evil-02.spec.mjs`)
 
 `connect-src 'none'` is the only thing between an opaque-origin frame and the
 network (a srcdoc iframe has no HTTP response to carry a CSP *header*).
@@ -85,9 +85,24 @@ Validated results:
   `webrtc` CSP directive exists — the #393 class — which the harness
   `nested-context lock` knob mirrors (Trusted Types default policy passing
   canonical HTML and rejecting frame-tag strings, non-configurable factory
-  pins, fail-closed byte scan of the verified bytes). Lock OFF — the battery
-  arms and the fresh realms report live RTC; lock ON — zero contexts minted,
-  `window.length` stays 0 across all 16 vectors. Both paths are CI-gated.
+  pins, fail-closed byte scan of the verified bytes, plus an
+  adoptNode/transformToFragment output scan for the XML-parser sinks —
+  findings #13). Lock OFF — the battery arms and the fresh realms report live
+  RTC; lock ON — zero contexts minted, `window.length` stays 0 across all 19
+  vectors. Both paths are CI-gated.
+- **Spec gap confirmed (findings #13, napplet/evil#5): XML parsers mint nested
+  contexts past a factory-pin + Trusted Types prevention layer.** Three vectors
+  added to the `webrtc-grandchild` battery build a frame element without ever
+  calling `createElement`/`createElementNS` or assigning a TrustedHTML string
+  sink, then move it live with `adoptNode`/`transformToFragment`:
+  `XSLTProcessor.transformToFragment` (`xsl:element name="iframe"`),
+  prefixed-namespace XHTML via `DOMParser(…, 'application/xml')` + `adoptNode`,
+  and DTD general-entity expansion. Each sets `srcdoc` via `setAttribute` on the
+  parsed node (not a factory, not a TT sink). Under the harness lock's first
+  three layers all three still mint `window.length > 0`; only a fourth layer —
+  an output scan on `adoptNode`/`importNode`/`transformToFragment` — closes
+  them. Measured minting in Chromium 147, Firefox 148, WebKit 26.4; CI-gated
+  both ways (lock OFF → minted, lock ON → DENIED by the output scan).
 - Prefetch / dns-prefetch hint loads are unverifiable from inside the frame —
   honest `na` ("treat the channel as open"): no directive governs them either.
 
@@ -321,6 +336,25 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     egresses from there (kehto/web#381 — the gap kehto/web#393's prevention
     closed in Kehto). While no `webrtc` CSP directive exists, only prevention
     closes it: the #393 class — Trusted Types default policy + pinned
-    element factories + a fail-closed host byte scan. Validated by evil-02's
-    16-vector `webrtc-grandchild` battery; the harness `nested-context lock`
-    knob is the green gate (arms off / holds on, both CI-gated).
+    element factories + a fail-closed host byte scan (plus the XML-parser
+    output scan of findings #13). Validated by evil-02's `webrtc-grandchild`
+    battery; the harness `nested-context lock` knob is the green gate (arms
+    off / holds on, both CI-gated).
+13. ✅ **XML parsers are a nested-context sink past factory pins + Trusted
+    Types** — a frame element built by an XML parser never passes through
+    `createElement`/`createElementNS` or a TrustedHTML string sink, so a
+    prevention layer made of pinned element factories plus a Trusted Types
+    default policy (plus a static byte scan, which does not match runtime XML
+    strings) does not reach it. Three vectors mint a live `about:srcdoc`
+    grandchild past such a layer: `XSLTProcessor.transformToFragment` emitting
+    `xsl:element name="iframe"`, prefixed-namespace XHTML via
+    `DOMParser(…, 'application/xml')` + `adoptNode`, and DTD general-entity
+    expansion; each sets `srcdoc` with `setAttribute` on the parsed node. Only
+    an output scan on `adoptNode`/`importNode`/`transformToFragment` (a fourth
+    layer) closes them. This is a completeness gap in the #393-class prevention
+    (kehto/web#381 follow-up), not a browser non-conformance — no `webrtc` CSP
+    directive governs any of it. Measured minting in Chromium 147, Firefox 148,
+    WebKit 26.4; validated by evil-02's `webrtc-grandchild` battery (19 vectors)
+    with the harness `nested-context lock` the green gate (arms off / holds on,
+    both CI-gated). Supports treating `window.length > 0` as nested-context /
+    replacement evidence at the spec level.
