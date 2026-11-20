@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 125 automated checks against real
+**All nine rungs are built and validated** — 137 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -137,7 +137,8 @@ relays, and shell-broadcast harvesting.
 Validated results:
 
 - **A compliant router holds**: declared-identity spoofing gets routed to the
-  *source* namespace (reply carries `no such key`), never the declared one.
+  *source* namespace (the trap key is absent there: NAP-STORAGE `value: null`,
+  or a pre-spec `no such key` error), never the declared one.
 - **A router that trusts declared fields arms**: the probe reads a value out
   of the declared sibling's namespace — any frame can act as any napplet.
 - **New finding (validated): srcdoc child iframes are NOT blocked by
@@ -171,7 +172,7 @@ Validated results:
 
 ### ✅ `evil-05-substitution` — Nostr-level substitution & storage inheritance
 
-Status: **built + validated** — 9/9 (`tests/evil-05.spec.mjs`)
+Status: **built + validated** — 12/12 (`tests/evil-05.spec.mjs`)
 
 Validated results, across three storage namespace policies:
 
@@ -183,6 +184,11 @@ Validated results, across three storage namespace policies:
   namespace keys.
 - VERY EVIL under `by-dTag` exfiltrated the inherited secret to the collector
   and **poisoned the namespace for the next heir**.
+- The storage probes (evil-05, evil-06, evil-09) call the NAP-STORAGE names
+  `getItem` / `setItem` / `removeItem` / `keys` (napplet/naps#3). A shell that
+  only exposes the pre-spec `get` / `set` / `remove` gets an explicit `na`
+  naming that shape, not a TypeError; the specs gate the spec shape in both
+  window and port binding.
 - The kit carries the unbound-dTag manifest (attacker key, victim dTag —
   findings #5) and a rollback/replay manifest (findings: no freshness rule).
 
@@ -193,14 +199,14 @@ NIP-5D explicitly does *not* protect against side-channel attacks
 
 ### ✅ `evil-06-side-channels` — oracles on shell mediation
 
-Status: **built + validated** — 5/5 (`tests/evil-06.spec.mjs`)
+Status: **built + validated** — 8/8 (`tests/evil-06.spec.mjs`)
 
 Validated results:
 
 - **Storage key-existence timing oracle ARMS under a fully compliant runtime**:
   hit vs miss latency separates cleanly (the harness backend answers ~40ms vs
   ~6ms) — key existence is readable through the ACL boundary by latency alone.
-- **Error taxonomy oracle arms**: "no such key" vs "value too large" vs
+- **Error taxonomy oracle arms**: a `null` miss vs "value too large" vs
   "policy denied" map the runtime's ACL boundaries for free.
 - **Shell scheduler RTT channel arms**: the parent echo round-trip is
   measurable from inside — recon for the same-process gadgets (see evil-08).
@@ -243,7 +249,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 34/34 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 40/40 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
