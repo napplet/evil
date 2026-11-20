@@ -222,6 +222,15 @@ Validated results:
   storage timing oracle and the error taxonomy complete over the port before
   the shell revokes on the first ping. `evil-window-level=skip` keeps the frame
   bound and reports `shell-rtt` as `na`.
+- **Rate-limited shells (napplet/evil#4)**: a limiter answers every
+  over-budget call with the same error, which used to read as a timing
+  "answer" and as a three-kind taxonomy. The timing sweep is now paced
+  (150 ms between samples) and never times limiter rejections; it reports `na`
+  (`not measured`) when fewer than half the samples were served. The error
+  taxonomy compares each case's answer, error message included, so identical
+  errors collapse to one signature; a limited case backs off 3.5 s and retries
+  once, and the row is `na` when fewer than two cases were measured. It arms
+  only on two or more distinct answers including at least one error.
 
 ### ✅ `evil-07-fingerprint` — identification that survives compliance
 

