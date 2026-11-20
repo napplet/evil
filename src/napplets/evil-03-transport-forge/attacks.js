@@ -11,6 +11,7 @@ const ATTACKS = [
     name: 'declared-identity spoof',
     target: '"The shell identifies senders via MessageEvent.source (unforgeable)"',
     severity: 'critical',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     harm: 'A runtime that resolves messages by DECLARED identity fields (windowId / dTag / artifactHash in the envelope) instead of the source Window lets any frame become any napplet — cross-napplet privilege forgery.',
     evilBrief: 'Sends storage.set / storage.get envelopes carrying a DECLARED windowId+dTag of a sibling napplet. A runtime that trusts declared fields routes the writes into the sibling\'s namespace — forging writes in another napplet\'s name.',
     async demo() {
@@ -44,6 +45,7 @@ const ATTACKS = [
     name: 'forged reply injection',
     target: '"Messages with an unrecognized type MUST be silently ignored"',
     severity: 'critical',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     harm: 'A router that accepts *.result envelopes by id (instead of binding the id to the Window that sent the REQUEST) lets an attacker inject replies into pending requests — poison data into a victim napplet\'s awaited call.',
     evilBrief: 'Blasts forged *.result envelopes with garbage ids at the shell — acceptance is the runtime\'s bug; watch the message log for any that get routed.',
     async demo() {
@@ -68,6 +70,7 @@ const ATTACKS = [
     name: 'sequential-id injection storm',
     target: 'id correlation across sibling napplets',
     severity: 'high',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     harm: 'SDKs generate guessable request ids (sequential, short). Combined with a router that accepts forged *.result by id, any sibling napplet can resolve another sibling\'s pending requests — cross-napplet confused deputy.',
     evilBrief: 'Blasts forged result envelopes for the most common id patterns (1..42, req-1, msg-1, nap-1, abc123) — whichever pattern your SDK uses, the forged reply lands in a pending sibling request.',
     async demo() {
@@ -93,6 +96,7 @@ const ATTACKS = [
     name: 'unknown-source nested relay',
     target: '"Messages from unknown sources MUST be silently dropped"',
     severity: 'critical',
+    windowLevel: true, // nested child posts to window.top (the shell's Window) — runs last (napplet/evil#3)
     harm: 'A frame nested inside the napplet (grandchild) can message the shell if the shell fails the source check — or if the router matches only "any iframe I created" rather than the exact Window. Untrusted relay from unmapped frames.',
     evilBrief: 'Creates nested child frames that postMessage the shell directly as if they were the napplet — a conforming shell drops them (see log); a router that matches loosely routes them.',
     async demo() {

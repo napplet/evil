@@ -107,6 +107,7 @@ const ATTACKS = [
     name: 'launcher metadata XSS',
     target: '"Clients MUST treat it as plain text, not HTML or Markdown"',
     severity: 'critical',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     harm: 'Manifest title/content rendered as HTML in the launcher runs SCRIPT IN THE SHELL ORIGIN — no sandbox escape needed, the launcher hands over the shell. Full compromise.',
     evilBrief: 'Sends a manifest whose title is an <img onerror> payload. In an unsafe launcher (innerHTML) it executes in SHELL origin: writes the red "EVIL-04 XSS EXECUTED IN SHELL ORIGIN" banner into the shell DOM and pings the collector. Safe launchers render it inert.',
     async demo() {

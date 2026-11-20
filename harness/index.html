@@ -86,6 +86,16 @@
     <label><input type="checkbox" name="trustdeclared"> trust DECLARED identity fields (sloppy router)</label>
   </fieldset>
   <fieldset>
+    <legend>run parameters (window.__EVIL_PARAMS__ pre-script)</legend>
+    <label>evil-window-level
+      <select name="windowlevel">
+        <option value="" selected>unset — napplet default (last)</option>
+        <option value="last">last — window-level probes run after the rest</option>
+        <option value="skip">skip — window-level probes report na in the sweep</option>
+      </select>
+    </label>
+  </fieldset>
+  <fieldset>
     <legend>launcher (manifest metadata render)</legend>
     <label><input type="radio" name="launcher" value="safe" checked> safe — textContent</label>
     <label><input type="radio" name="launcher" value="unsafe"> unsafe — innerHTML (XSS)</label>
@@ -219,6 +229,7 @@
   let store = {};
   window.__evilStore = () => store;
   window.__evilLogLines = [];
+  window.__evilLogAt = []; // Date.now() per log line (ordering checks in tests)
   /* post-#14 port session: (dTag, artifactHash) + grants bound to the port
      handed over by the verified document's bootstrap — never to the Window. */
   let session = null;
@@ -255,6 +266,7 @@
   }
   function log(line) {
     window.__evilLogLines.push(line);
+    window.__evilLogAt.push(Date.now());
     msgs.textContent += line + '\n';
     msgs.scrollTop = msgs.scrollHeight;
   }
@@ -420,9 +432,11 @@
     if (!d || typeof d.type !== 'string') return;
     const binding = new FormData(controls).get('binding') || 'window';
     if (binding === 'port') {
-      /* post-#14: NAP rides the bound port only. Window-level messages from
-         the frame are replacement evidence (except the harness's own evil.*
-         test channel, which real shells do not have and should also revoke). */
+      /* post-#14: NAP rides the bound port only. After the napplet.hello
+         handoff, ANY window-level message from the bound frame (storage.*,
+         relay.*, the harness's own evil.* test channel, …) is replacement
+         evidence under NIP-5D: revoke and tear the frame down. That is why the
+         napplets run their window-level probes last (napplet/evil#3). */
       if (d.type === 'napplet.hello') {
         if (session && e.source === frame.contentWindow) {
           log('DROPPED second napplet.hello — replacement evidence');
@@ -442,9 +456,12 @@
         return;
       }
       if (frameEl === frame) {
-        const nap = d.type.indexOf('storage.') === 0 || d.type.indexOf('napplet.') === 0;
-        log('DROPPED window-level ' + (nap ? 'NAP (' + d.type + ') — post-handoff window-level NAP is replacement evidence' : 'non-NAP chatter (' + d.type + ') — port mode speaks only over the bound port'));
-        if (nap) revoke('post-handoff window-level NAP message: ' + d.type);
+        if (session) {
+          log('DROPPED window-level ' + d.type + ' — post-handoff window-level message is replacement evidence');
+          revoke('window-level NAP message after napplet.hello handoff (' + d.type + ')');
+        } else {
+          log('DROPPED window-level ' + d.type + ' — no port session bound (port mode speaks only over the bound port)');
+        }
         return;
       }
       log('DROPPED message from sibling (no port session): ' + JSON.stringify(d).slice(0, 140));
@@ -490,6 +507,7 @@
     const nostrOn = f.get('nostr') === 'on';
     const runtimeOn = f.get('runtime') === 'on';
     const policy = f.get('policy');
+    const windowLevel = f.get('windowlevel') || '';
     const napplet = nappletSel.value;
 
     const res = await fetch('../napplets/' + napplet + '/index.html');
@@ -537,6 +555,19 @@
       artifact = /<head[^>]*>/i.test(artifact)
         ? artifact.replace(/<head[^>]*>/i, (m) => m + RUNTIME_SHIM)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + RUNTIME_SHIM + '</head>');
+    }
+
+    /* run parameters: a pre-script setting window.__EVIL_PARAMS__, injected
+       OUTSIDE the hashed bytes and independent of the storage runtime /
+       binding knobs (the chrome's evilParam() reads it first). Injected last
+       so it lands first in <head>, before every other script. */
+    const params = {};
+    if (windowLevel) params['evil-window-level'] = windowLevel;
+    if (Object.keys(params).length) {
+      const paramsScript = '<script>window.__EVIL_PARAMS__ = ' + JSON.stringify(params).replace(/</g, '\\u003c') + ';<\/script>';
+      artifact = /<head[^>]*>/i.test(artifact)
+        ? artifact.replace(/<head[^>]*>/i, (m) => m + paramsScript)
+        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + paramsScript + '</head>');
     }
 
     /* supersede any live port session from a previous load */
@@ -624,6 +655,7 @@
       ' · nested-context lock: ' + (nestedLockOn ? 'ON (TT default policy + factory pins + byte scan)' : 'off') +
       ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
       ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
+      ' · evil-window-level: ' + (windowLevel || 'unset') +
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
   }
