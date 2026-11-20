@@ -53,7 +53,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 132 automated checks against real
+**All nine rungs are built and validated** — 159 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -106,7 +106,13 @@ every knob re-arms a different subset of the attacks:
   0 across all 19 vectors. `tests/evil-02.spec.mjs` gates both paths.
 - **shell `window.nostr`** — a fake NIP-07 extension, arms ambient-signing probes.
 - **sibling iframe** — arms `parent.length` enumeration.
-- **fake NAP runtime** — injects a `window.napplet.storage` domain (pre-script,
+- **host frame-src 'none'** — puts `frame-src 'none'` on the embedding page
+  (reloads the harness with `?hostframesrc=none`). The shell's srcdoc napplet
+  still loads; a napplet navigating its own frame to data:/http(s): — even
+  before its first load, where replacement-watch is blind — is blocked. The
+  embedding-page green gate for evil-09's pre-load self-navigation (finding 14).
+- **fake NAP runtime** — injects a NAP-STORAGE `window.napplet.storage` domain
+  (`getItem` → `null` on a miss, `setItem`, `removeItem`, `keys`; pre-script,
   outside the hashed artifact bytes, like a real runtime) with a selectable
   **namespace policy**: `by-(dTag+hash)` (spec-safe), `by-dTag` (version
   substitution leaks), or `global` (everything shared) — arms the evil-05
@@ -162,7 +168,7 @@ harness/
   index.html                          # configurable victim shell
   replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-9].spec.mjs   # 132 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 159 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 

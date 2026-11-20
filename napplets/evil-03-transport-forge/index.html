@@ -440,7 +440,8 @@ const ATTACKS = [
       });
       const r = await waitForMsg(id, 1600);
       if (r === 'timeout') return blocked('no reply — router did not service the request at all');
-      if (r.error) return blocked('routed to MY OWN namespace (reply error: ' + r.error + ') — router binds to MessageEvent.source, declared fields ignored: held');
+      // NAP-STORAGE: a miss is value null (pre-spec shells sent an error) — either means my own, empty namespace
+      if (r.error || r.value == null) return blocked('routed to MY OWN namespace (' + (r.error ? 'reply error: ' + r.error : 'value null: trap key absent there') + ') — router binds to MessageEvent.source, declared fields ignored: held');
       return armed('router returned a value from the DECLARED sibling namespace (' + mask(r.value, 20) + ') — envelope identity fields are TRUSTED over MessageEvent.source: any frame can act as any napplet');
     },
     async evil() {
@@ -512,7 +513,7 @@ const ATTACKS = [
     name: 'unknown-source nested relay',
     target: '"Messages from unknown sources MUST be silently dropped"',
     severity: 'critical',
-    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
+    windowLevel: true, // nested child posts to window.top (the shell's Window) — runs last (napplet/evil#3)
     harm: 'A frame nested inside the napplet (grandchild) can message the shell if the shell fails the source check — or if the router matches only "any iframe I created" rather than the exact Window. Untrusted relay from unmapped frames.',
     evilBrief: 'Creates nested child frames that postMessage the shell directly as if they were the napplet — a conforming shell drops them (see log); a router that matches loosely routes them.',
     async demo() {

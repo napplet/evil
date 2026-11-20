@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-napplets harness — victim shell</title>
+<script>
+  /* Embedding-page frame navigation gate (napplet/evil#5, ROADMAP finding 14).
+     ?hostframesrc=none installs `frame-src 'none'` on THIS (the embedding)
+     document before any frame exists. It does not stop the shell's own srcdoc
+     napplet from loading, but it blocks the napplet frame from navigating
+     itself to data:/blob:/http(s): — including before its first load event,
+     where replacement-watch has no baseline. A meta CSP cannot be removed, so
+     the knob reloads the harness with or without the query parameter. */
+  (function () {
+    if (new URLSearchParams(location.search).get('hostframesrc') !== 'none') return;
+    var m = document.createElement('meta');
+    m.httpEquiv = 'Content-Security-Policy';
+    m.content = "frame-src 'none'";
+    document.head.appendChild(m);
+    window.__evilHostFrameSrc = "frame-src 'none'";
+  })();
+</script>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; background: #15121b; color: #e9e6f2; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -54,6 +71,7 @@
     <label><input type="checkbox" name="nestedlock"> nested-context lock (#393: TT default + factory pins + byte scan)</label>
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
+    <label><input type="checkbox" name="hostframesrc" id="hostFrameSrc"> host frame-src 'none' (embedding-page CSP · reloads)</label>
   </fieldset>
   <fieldset>
     <legend>fake NAP runtime (window.napplet.storage)</legend>
@@ -292,9 +310,10 @@
     '  }',
     '  function ok(r) { if (r && r.error) throw new Error(r.error); return r; }',
     '  window.napplet = { storage: {',
-    '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
-    '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
-    '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+    '    getItem: function (k) { return req("storage.get", { key: k }).then(function (r) { var v = ok(r).value; return v === undefined ? null : v; }); },',
+    '    setItem: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); }); },',
+    '    removeItem: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); }); },',
+    '    keys: function () { return req("storage.keys").then(function (r) { return ok(r).keys || []; }); },',
     '  } };',
     '})();<\/script>',
   ].join('\n');
@@ -323,9 +342,10 @@
     if (withStorage) {
       lines.push(
         '  window.napplet = { storage: {',
-        '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
-        '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
-        '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+        '    getItem: function (k) { return req("storage.get", { key: k }).then(function (r) { var v = ok(r).value; return v === undefined ? null : v; }); },',
+        '    setItem: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); }); },',
+        '    removeItem: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); }); },',
+        '    keys: function () { return req("storage.keys").then(function (r) { return ok(r).keys || []; }); },',
         '  } };'
       );
     } else {
@@ -366,16 +386,18 @@
     if (msg.type === 'storage.get') {
       const hit = Object.prototype.hasOwnProperty.call(nsStore, msg.key);
       await delay(hit ? 40 : 6); // hit/miss latency difference: evil-06's oracle backend
-      if (hit) reply({ value: nsStore[msg.key] });
-      else reply({ error: 'no such key' });
+      reply({ value: hit ? nsStore[msg.key] : null }); // NAP-STORAGE: missing key → value null
     } else if (msg.type === 'storage.set') {
       const size = typeof msg.value === 'string' ? msg.value.length : 999999999;
       if (size > 512 * 1024) { reply({ error: 'value too large (>512KB)' }); }
-      else { await delay(8); nsStore[msg.key] = msg.value; reply({ value: true }); }
+      else { await delay(8); nsStore[msg.key] = msg.value; reply({ value: true }); } // NAP-STORAGE result is bare {id}; extra value:true kept for evil-09 stage-2's raw-wire check
     } else if (msg.type === 'storage.remove') {
       await delay(8);
       delete nsStore[msg.key];
       reply({ value: true });
+    } else if (msg.type === 'storage.keys') {
+      await delay(8);
+      reply({ keys: Object.keys(nsStore) });
     } else {
       /* unrecognized storage.* type: silently ignored per NIP-5D */ 
     }
@@ -637,6 +659,20 @@
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
   }
+
+  /* host frame-src knob: reflect the current state, reload to toggle */
+  const hostFsBox = document.getElementById('hostFrameSrc');
+  hostFsBox.checked = !!window.__evilHostFrameSrc;
+  hostFsBox.addEventListener('change', () => {
+    const u = new URL(location.href);
+    if (hostFsBox.checked) u.searchParams.set('hostframesrc', 'none');
+    else u.searchParams.delete('hostframesrc');
+    location.replace(u.href);
+  });
+  document.addEventListener('securitypolicyviolation', (e) => {
+    log('HOST CSP BLOCKED ' + (e.effectiveDirective || e.violatedDirective) + ' — ' + String(e.blockedURI || '(inline)').slice(0, 60));
+  });
+  if (window.__evilHostFrameSrc) log('host CSP: ' + window.__evilHostFrameSrc + ' on the embedding page');
 
   document.getElementById('loadBtn').addEventListener('click', () => { void load(); });
   void load();

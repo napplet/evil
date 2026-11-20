@@ -13,6 +13,17 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   const st = await statuses(f);
   check('by-(dTag+hash): inheritance held (namespaced to artifact identity)', st['inherited-storage'] === 'blocked', JSON.stringify(st));
   check('by-(dTag+hash): cross-namespace read held', st['cross-namespace-read'] === 'blocked');
+  {
+    // NAP-STORAGE (napplet/naps#3): the probes must exercise getItem/keys, not the pre-spec get/set/remove
+    const api = await f.evaluate(async () => {
+      const s = window.napplet.storage;
+      return { getItem: typeof s.getItem, keys: typeof s.keys, legacyGet: typeof s.get, miss: await s.getItem('__absent__' + Math.random()), listed: await s.keys() };
+    });
+    check('by-(dTag+hash): injected storage is NAP-STORAGE shaped (getItem/keys, no legacy get)', api.getItem === 'function' && api.keys === 'function' && api.legacyGet === 'undefined', JSON.stringify(api));
+    check('by-(dTag+hash): getItem on a missing key resolves null; keys() lists the seeded key', api.miss === null && Array.isArray(api.listed) && api.listed.includes('__evil06_seeded__'), JSON.stringify(api));
+    const ev = (await Promise.all(['inherited-storage', 'cross-namespace-read'].map((id) => evidence(f, id)))).join(' | ');
+    check('by-(dTag+hash): storage rows ran on the spec API (no "is not a function", no pre-spec na)', !/is not a function|not NAP-STORAGE shaped/.test(ev), ev.slice(0, 200));
+  }
   await page.close();
 }
 
