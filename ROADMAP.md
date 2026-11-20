@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 104 automated checks against real
+**All nine rungs are built and validated** — 107 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -52,7 +52,7 @@ NIP-07 extension injecting `window.nostr` into iframes (all_frames).
 
 ### ✅ `evil-02-csp-egress` — CSP & network egress
 
-Status: **built + validated** — 25/25 (`tests/evil-02.spec.mjs`)
+Status: **built + validated** — 28/28 (`tests/evil-02.spec.mjs`)
 
 `connect-src 'none'` is the only thing between an opaque-origin frame and the
 network (a srcdoc iframe has no HTTP response to carry a CSP *header*).
@@ -88,8 +88,18 @@ Validated results:
   pins, fail-closed byte scan of the verified bytes). Lock OFF — the battery
   arms and the fresh realms report live RTC; lock ON — zero contexts minted,
   `window.length` stays 0 across all 16 vectors. Both paths are CI-gated.
-- Prefetch / dns-prefetch hint loads are unverifiable from inside the frame —
-  honest `na` ("treat the channel as open"): no directive governs them either.
+- **Resource hints are not reliably governed by `default-src 'none'` (findings
+  #15, napplet/evil#5).** The `resource-hints` row inserts prefetch,
+  dns-prefetch, preconnect and prerender; all four are unverifiable from inside
+  the frame (no violation/load/error event), so demo mode is honest `na`. The
+  **local-sink mode** observes the egress out-of-frame instead of assuming it:
+  pointed at a local HTTP sink on the real Chromium channel, `prerender` issues a
+  real HTTP GET carrying `Sec-Purpose: prefetch` even under the napplet's
+  `default-src 'none'` CSP — a browser non-conformance against CSP3 ED
+  (`w3c/webappsec-csp@e3461f7`, which places these under `default-src`). CI-gated
+  in `tests/evil-02.spec.mjs`; Playwright's default bundled build fires no hints,
+  so the gate uses `channel: 'chromium'` + `--enable-features=NetworkPrediction`
+  and degrades to a capability note where that channel is absent.
 
 ## Tier 1 — transport confusion (lazy runtimes)
 
@@ -324,3 +334,28 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     element factories + a fail-closed host byte scan. Validated by evil-02's
     16-vector `webrtc-grandchild` battery; the harness `nested-context lock`
     knob is the green gate (arms off / holds on, both CI-gated).
+15. ✅ **Resource hints are not reliably governed by `default-src 'none'`** — a
+    srcdoc napplet under the spec baseline can still reach the network through
+    `<link rel>` resource hints, which no fetch directive observes and which
+    CSP3 ED (`w3c/webappsec-csp@e3461f7`) places under `default-src` — so a
+    browser that lets them through under `default-src 'none'` is non-conformant.
+    From inside the frame the loads are unverifiable (no violation/load/error
+    event); the local-sink mode observes them out-of-frame. Measured per engine
+    (Kehto Playwright probes; prerender reconfirmed on the Chromium channel in
+    `tests/evil-02.spec.mjs`):
+
+    | hint | Chromium 147 | Firefox 148 | WebKit 26.4 |
+    |------|--------------|-------------|-------------|
+    | `rel=prerender` | HTTP GET, `Sec-Purpose: prefetch` | — | — |
+    | `rel=preconnect` | DNS + TCP (network prediction on) | — | TCP |
+    | `rel=dns-prefetch` | DNS (network prediction on) | DNS (DNS prefetch enabled) | — |
+    | `rel=prefetch` | governed by `default-src` here (CSP violation) | — | — |
+
+    A dash is "not observed in that engine/config", not "closed" — these are
+    prediction/flag-gated and build-dependent, which is itself the point: the
+    napplet CSP is not the control. Playwright's default context disables network
+    prediction, so preconnect/dns-prefetch need the real browser channel with
+    prediction enabled; prerender's HTTP GET fires regardless and is the CI
+    anchor. Closing this needs an embedding-page / Permissions-Policy control or
+    a CSP directive the browser actually enforces for hints — a spec gap for the
+    NIP-5D CSP advisory (C/D/E). (napplet/evil#5)

