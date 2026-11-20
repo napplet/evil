@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-napplets harness — victim shell</title>
+<script>
+  /* Embedding-page frame navigation gate (napplet/evil#5, ROADMAP finding 14).
+     ?hostframesrc=none installs `frame-src 'none'` on THIS (the embedding)
+     document before any frame exists. It does not stop the shell's own srcdoc
+     napplet from loading, but it blocks the napplet frame from navigating
+     itself to data:/blob:/http(s): — including before its first load event,
+     where replacement-watch has no baseline. A meta CSP cannot be removed, so
+     the knob reloads the harness with or without the query parameter. */
+  (function () {
+    if (new URLSearchParams(location.search).get('hostframesrc') !== 'none') return;
+    var m = document.createElement('meta');
+    m.httpEquiv = 'Content-Security-Policy';
+    m.content = "frame-src 'none'";
+    document.head.appendChild(m);
+    window.__evilHostFrameSrc = "frame-src 'none'";
+  })();
+</script>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; background: #15121b; color: #e9e6f2; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -54,6 +71,7 @@
     <label><input type="checkbox" name="nestedlock"> nested-context lock (#393: TT default + factory pins + byte scan)</label>
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
+    <label><input type="checkbox" name="hostframesrc" id="hostFrameSrc"> host frame-src 'none' (embedding-page CSP · reloads)</label>
   </fieldset>
   <fieldset>
     <legend>fake NAP runtime (window.napplet.storage)</legend>
@@ -605,6 +623,20 @@
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
   }
+
+  /* host frame-src knob: reflect the current state, reload to toggle */
+  const hostFsBox = document.getElementById('hostFrameSrc');
+  hostFsBox.checked = !!window.__evilHostFrameSrc;
+  hostFsBox.addEventListener('change', () => {
+    const u = new URL(location.href);
+    if (hostFsBox.checked) u.searchParams.set('hostframesrc', 'none');
+    else u.searchParams.delete('hostframesrc');
+    location.replace(u.href);
+  });
+  document.addEventListener('securitypolicyviolation', (e) => {
+    log('HOST CSP BLOCKED ' + (e.effectiveDirective || e.violatedDirective) + ' — ' + String(e.blockedURI || '(inline)').slice(0, 60));
+  });
+  if (window.__evilHostFrameSrc) log('host CSP: ' + window.__evilHostFrameSrc + ' on the embedding page');
 
   document.getElementById('loadBtn').addEventListener('click', () => { void load(); });
   void load();

@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 110 automated checks against real
+**All nine rungs are built and validated** — 120 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -227,7 +227,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 24/24 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 34/34 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
@@ -268,6 +268,23 @@ Validated results:
   namespace (`__evil09_poison__` for the next legit load to inherit) and
   exfiltrated the seed to the collector via the navigation URL — two egress
   channels, end to end.
+- **Pre-load self-navigation (findings #14, napplet/evil#5)**: a napplet whose
+  FIRST inline script self-navigates replaces its own document *before the
+  frame's first load event fires*. Replacement-watch keyed on a second load or a
+  second `napplet.hello` has no baseline — there was never a first load of the
+  verified document to diff against. Measured with a pre-load fixture: under
+  window binding the data: replacement's raw window-level `storage.get` is
+  ACCEPTED and served the verified seed with no teardown; under the port binding
+  it is `REVOKED` all the same, because post-handoff window-level NAP is
+  replacement evidence whatever the timing — so the port binding is the gate.
+  The target scheme (data:/blob:/https:) is governed only by the *embedding
+  page's* frame navigation policy, not the napplet's own CSP — and that is the
+  second gate: the harness `host frame-src 'none'` knob (`?hostframesrc=none`)
+  puts `frame-src 'none'` on the embedding page; the shell's srcdoc napplet still
+  loads and runs, but the pre-load self-navigation to data: or http(s): is
+  blocked (`HOST CSP BLOCKED frame-src`, no request reaches the target) even
+  under window binding. Without it the http(s) navigation lands. All paths
+  CI-gated (`tests/evil-09.spec.mjs`).
 
 | # | Attack | Spec clause |
 |---|--------|-------------|
@@ -358,3 +375,25 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     with the harness `nested-context lock` the green gate (arms off / holds on,
     both CI-gated). Supports treating `window.length > 0` as nested-context /
     replacement evidence at the spec level.
+    element factories + a fail-closed host byte scan. Validated by evil-02's
+    16-vector `webrtc-grandchild` battery; the harness `nested-context lock`
+    knob is the green gate (arms off / holds on, both CI-gated).
+14. ✅ **Replacement-watch is blind to a pre-first-load self-navigation** — a
+    napplet whose first inline script navigates the frame to data:/blob:/https:
+    replaces its own document before the frame ever fires a first load event, so
+    a shell that detects replacement by counting loads or waiting for a second
+    `napplet.hello` has no baseline to diff against. Measured: under window
+    binding the data: replacement's raw window-level `storage.get` is ACCEPTED
+    and served the verified napplet's seed with no teardown; under the post-#14
+    port binding it is `REVOKED` all the same, because treating any post-handoff
+    window-level NAP as replacement evidence is timing-independent — that, not
+    load-counting, is one control that holds. The other is the *embedding
+    page's* frame navigation policy, which alone governs the target scheme: an
+    embedding-page `frame-src 'none'` leaves the shell's srcdoc napplet loading
+    normally but blocks its pre-load self-navigation to data: or http(s):
+    (measured in Chromium here; Chromium 147, Firefox 148.0.2, WebKit 26.4 per
+    the independent re-measurement). Validated by evil-09's pre-load fixture
+    (window serves / port revokes / host `frame-src 'none'` blocks, all
+    CI-gated);
+    repro in the evil-09 kit. Supports the NIP-5D proposal that replacement
+    evidence cannot be keyed on the first `load`. (napplet/evil#5)
