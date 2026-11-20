@@ -45,6 +45,7 @@
     dTag: Q.get('dTag') || 'unknown',
     collector: Q.get('collector') || '',
     data: Q.get('data') || '',
+    targetSrc: Q.get('target_src') || '',
   };
   document.getElementById('dtag').textContent = C.dTag;
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
@@ -74,7 +75,7 @@
     });
   }
   row('replaced-document', 'document replaced in-frame', 'armed',
-    'this document was fetched over the network from ' + esc(location.origin + location.pathname) + ' — NOT the verified srcdoc bytes. The iframe Window never changed, so a shell that maps (dTag, artifactHash) to the Window still treats these bytes as ' + esc(C.dTag) + '.');
+    'this document was fetched over the network from ' + esc(location.origin + location.pathname) + ' — NOT the verified srcdoc bytes. The iframe Window never changed, so a shell that maps (dTag, artifactHash) to the Window still treats these bytes as ' + esc(C.dTag) + '.' + (C.targetSrc ? ' [target: ' + esc(location.origin + location.pathname) + ' (from run parameter ' + esc(C.targetSrc) + ')]' : ''));
   post({ type: 'evil.stage2.report', report: fullReport() });
   async function main() {
     const r = await rawNap('storage.get', '__evil09_victim__');

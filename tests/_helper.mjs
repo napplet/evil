@@ -32,6 +32,10 @@ export async function loadHarness(page, opts = {}) {
   if (opts.policy) await page.selectOption('select[name="policy"]', opts.policy);
   if (opts.trustDeclared === true) await page.check('input[name="trustdeclared"]');
   if (opts.launcher) await page.check('input[name="launcher"][value="' + opts.launcher + '"]');
+  if (opts.noReferrer === true) await page.check('input[name="noreferrer"]');
+  // run parameter evil09-target: a string replaces the default same-host
+  // fixture URL; '' clears it (no network target → scheme-local data:)
+  if (typeof opts.evil09Target === 'string') await page.fill('input[name="evil09target"]', opts.evil09Target);
   // run parameter evil-window-level ('last' | 'skip'), injected as window.__EVIL_PARAMS__
   if (opts.windowLevel) await page.selectOption('select[name="windowlevel"]', opts.windowLevel);
   const wantId = opts.napplet || await page.$eval('#nappletSel', (el) => el.value);

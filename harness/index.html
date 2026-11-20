@@ -72,6 +72,7 @@
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
     <label><input type="checkbox" name="hostframesrc" id="hostFrameSrc"> host frame-src 'none' (embedding-page CSP · reloads)</label>
+    <label><input type="checkbox" name="noreferrer"> strip referrer (iframe referrerpolicy=no-referrer)</label>
   </fieldset>
   <fieldset>
     <legend>fake NAP runtime (window.napplet.storage)</legend>
@@ -94,6 +95,7 @@
         <option value="skip">skip — window-level probes report na in the sweep</option>
       </select>
     </label>
+    <label>evil09-target <input type="text" name="evil09target" size="44" placeholder="empty = no network target (scheme-local data:)"></label>
   </fieldset>
   <fieldset>
     <legend>launcher (manifest metadata render)</legend>
@@ -509,6 +511,13 @@
     const policy = f.get('policy');
     const windowLevel = f.get('windowlevel') || '';
     const napplet = nappletSel.value;
+    /* run parameters (napplet/evil#3): a srcdoc napplet has no URL of its
+       own, so the shell hands them over as window.__EVIL_PARAMS__ in a
+       pre-script. A cleared field is injected as "" (explicitly no network
+       target) so a stray #evil09-target= on this page's URL, which reaches
+       the srcdoc via document.baseURI, cannot override the clear. */
+    const runParams = { 'evil09-target': String(f.get('evil09target') || '').trim() };
+    if (windowLevel) runParams['evil-window-level'] = windowLevel;
 
     const res = await fetch('../napplets/' + napplet + '/index.html');
     const raw = await res.text();
@@ -556,19 +565,14 @@
         ? artifact.replace(/<head[^>]*>/i, (m) => m + RUNTIME_SHIM)
         : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + RUNTIME_SHIM + '</head>');
     }
-
-    /* run parameters: a pre-script setting window.__EVIL_PARAMS__, injected
-       OUTSIDE the hashed bytes and independent of the storage runtime /
-       binding knobs (the chrome's evilParam() reads it first). Injected last
-       so it lands first in <head>, before every other script. */
-    const params = {};
-    if (windowLevel) params['evil-window-level'] = windowLevel;
-    if (Object.keys(params).length) {
-      const paramsScript = '<script>window.__EVIL_PARAMS__ = ' + JSON.stringify(params).replace(/</g, '\\u003c') + ';<\/script>';
-      artifact = /<head[^>]*>/i.test(artifact)
-        ? artifact.replace(/<head[^>]*>/i, (m) => m + paramsScript)
-        : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + paramsScript + '</head>');
-    }
+    /* run parameters: injected for every load — window or port binding,
+       storage runtime on or off. Inserted last, so it lands first in <head>
+       and is readable before any other script. JSON with < escaped: the
+       text field is user input and must not close the script element. */
+    const paramsScript = '<script>window.__EVIL_PARAMS__ = ' + JSON.stringify(runParams).replace(/</g, '\\u003c') + ';<\/script>';
+    artifact = /<head[^>]*>/i.test(artifact)
+      ? artifact.replace(/<head[^>]*>/i, (m) => m + paramsScript)
+      : artifact.replace(/<html[^>]*>/i, (m) => m + '<head>' + paramsScript + '</head>');
 
     /* supersede any live port session from a previous load */
     if (session) {
@@ -593,6 +597,7 @@
     frame.dataset.artifactHash = hash;
     frame.dataset.runtime = runtimeOn ? '1' : '0';
 
+    if (f.get('noreferrer') === 'on') frame.referrerPolicy = 'no-referrer';
     if (preset === 'spec') frame.setAttribute('sandbox', 'allow-scripts');
     else if (preset === 'same-origin') frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
     else frame.removeAttribute('sandbox');
@@ -655,6 +660,8 @@
       ' · nested-context lock: ' + (nestedLockOn ? 'ON (TT default policy + factory pins + byte scan)' : 'off') +
       ' · shell window.nostr: ' + (nostrOn ? 'present (fake NIP-07)' : 'absent') +
       ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
+      ' · evil09-target: ' + (runParams['evil09-target'] || '(empty — scheme-local data:)') +
+      (f.get('noreferrer') === 'on' ? ' · referrer: stripped' : '') +
       ' · evil-window-level: ' + (windowLevel || 'unset') +
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
@@ -674,6 +681,9 @@
   });
   if (window.__evilHostFrameSrc) log('host CSP: ' + window.__evilHostFrameSrc + ' on the embedding page');
 
+  /* default network target = the same-host fixture (what the referrer-derived
+     target used to resolve to); set before the first automatic load */
+  controls.elements.evil09target.value = location.origin + '/harness/replace-target.html';
   document.getElementById('loadBtn').addEventListener('click', () => { void load(); });
   void load();
 })();

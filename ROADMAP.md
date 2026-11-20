@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 159 automated checks against real
+**All nine rungs are built and validated** — 169 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -259,7 +259,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 40/40 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 50/50 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
@@ -275,6 +275,13 @@ Validated results:
   navigation — DETONATE (operator-triggered, never auto-run) replaced the
   verified document in-place, same Window, via both the network path
   (`harness/replace-target.html`, the attacker-page stand-in) and a data: URL.
+- **The network target is a run parameter** (napplet/evil#3): `evil09-target`
+  names it, and the harness injects the same-host fixture by default. It used
+  to come from `document.referrer`, so a shell that empties the referrer
+  silently turned the probe into the data: path. Now an absent or empty value
+  is an explicit scheme-local run, an http(s) URL is the network run, and any
+  other scheme is rejected without navigating. The suite also proves the
+  target holds with the iframe's referrer stripped (`referrerpolicy=no-referrer`).
 - **Window-keyed shells hand over everything**: raw window-level NAP from the
   unverified stage-2 bytes was ACCEPTED and served the verified napplet's
   namespace seed (`victim-data-INHERITED-BY-EVIL-09`); the shell logged the

