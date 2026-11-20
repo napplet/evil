@@ -135,6 +135,12 @@
           element factories. delete+reassign recovery lands back on the guard.
        3. Byte scan: see load() — the shell refuses verified bytes that
           declare static frame markup, before they become a document.
+       4. XML-parser output scan: adoptNode/importNode/transformToFragment
+          reject a moved subtree that carries a frame element. XML parsers
+          (XSLT, application/xml DOMParser, DTD entities) build frame nodes
+          without createElement or a TrustedHTML sink, so layers 1-2 never see
+          them and layer 3 (static markup) does not match runtime XML strings
+          (ROADMAP finding 13, napplet/evil#5).
      Together: no fresh realm (with a live RTCPeerConnection no CSP directive
      reaches — kehto/web#381) is ever minted from the napplet realm. */
   const LOCK_PRELUDE = [
@@ -167,6 +173,28 @@
     '  pin(Document.prototype, \'createElement\', guardFactory);',
     '  pin(Document.prototype, \'createElementNS\', guardNSFactory);',
     '  pin(DOMImplementation.prototype, \'createDocument\', guardNSFactory);',
+    // Layer 4: XML-parser output scan. XSLTProcessor.transformToFragment and
+    // adoptNode/importNode move frame elements built by an XML parser into the
+    // live document WITHOUT passing through createElement/createElementNS or a
+    // TrustedHTML string sink — so layers 1-3 never see them (ROADMAP finding
+    // 13, napplet/evil#5). Scan each moved subtree for a frame localName, fail
+    // closed. The static byte scan in load() is the companion static layer.
+    '  function scanFrames(node) {',
+    '    if (!node || typeof node !== \'object\') return false;',
+    '    if (node.nodeType === 1 && FRAME.test(localName(node.localName || node.nodeName))) return true;',
+    '    if (node.querySelectorAll) { var all = node.querySelectorAll(\'*\'); for (var i = 0; i < all.length; i++) if (FRAME.test(localName(all[i].localName || all[i].nodeName))) return true; }',
+    '    return false;',
+    '  }',
+    '  function guardMove(orig) {',
+    '    return function (n) { if (scanFrames(n)) deny(\'xml-parser frame node\'); return orig.apply(this, arguments); };',
+    '  }',
+    '  pin(Document.prototype, \'adoptNode\', guardMove);',
+    '  pin(Document.prototype, \'importNode\', guardMove);',
+    '  if (window.XSLTProcessor) {',
+    '    pin(XSLTProcessor.prototype, \'transformToFragment\', function (orig) {',
+    '      return function () { var f = orig.apply(this, arguments); if (scanFrames(f)) deny(\'xslt frame node\'); return f; };',
+    '    });',
+    '  }',
     '})();<\/script>',
   ].join('\n');
 
