@@ -155,6 +155,9 @@ Missing → each probe uses its documented default.
   Window-level rows: evil-03 `declared-identity`, `forged-reply`,
   `sequential-ids`, `unknown-source`; evil-04 `launcher-xss`; evil-06
   `shell-rtt`; evil-08 `same-thread`.
+  evil-06's storage rows pace themselves for rate-limited shells: limiter
+  rejections are neither timed nor classified, and `error-taxonomy` compares
+  error messages across cases rather than counting throws (napplet/evil#4).
 
 It also seeds victim canaries (`nsec` marker in `localStorage`, inherited v1
   secrets per namespace policy, and a per-load `__evil09_victim__` grant seed),
