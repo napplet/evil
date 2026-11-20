@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 106 automated checks against real
+**All nine rungs are built and validated** — 125 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -58,7 +58,7 @@ NIP-07 extension injecting `window.nostr` into iframes (all_frames).
 
 ### ✅ `evil-02-csp-egress` — CSP & network egress
 
-Status: **built + validated** — 25/25 (`tests/evil-02.spec.mjs`)
+Status: **built + validated** — 34/34 (`tests/evil-02.spec.mjs`)
 
 `connect-src 'none'` is the only thing between an opaque-origin frame and the
 network (a srcdoc iframe has no HTTP response to carry a CSP *header*).
@@ -91,11 +91,36 @@ Validated results:
   `webrtc` CSP directive exists — the #393 class — which the harness
   `nested-context lock` knob mirrors (Trusted Types default policy passing
   canonical HTML and rejecting frame-tag strings, non-configurable factory
-  pins, fail-closed byte scan of the verified bytes). Lock OFF — the battery
-  arms and the fresh realms report live RTC; lock ON — zero contexts minted,
-  `window.length` stays 0 across all 16 vectors. Both paths are CI-gated.
-- Prefetch / dns-prefetch hint loads are unverifiable from inside the frame —
-  honest `na` ("treat the channel as open"): no directive governs them either.
+  pins, fail-closed byte scan of the verified bytes, plus an
+  adoptNode/transformToFragment output scan for the XML-parser sinks —
+  findings #13). Lock OFF — the battery arms and the fresh realms report live
+  RTC; lock ON — zero contexts minted, `window.length` stays 0 across all 19
+  vectors. Both paths are CI-gated.
+- **Spec gap confirmed (findings #13, napplet/evil#5): XML parsers mint nested
+  contexts past a factory-pin + Trusted Types prevention layer.** Three vectors
+  added to the `webrtc-grandchild` battery build a frame element without ever
+  calling `createElement`/`createElementNS` or assigning a TrustedHTML string
+  sink, then move it live with `adoptNode`/`transformToFragment`:
+  `XSLTProcessor.transformToFragment` (`xsl:element name="iframe"`),
+  prefixed-namespace XHTML via `DOMParser(…, 'application/xml')` + `adoptNode`,
+  and DTD general-entity expansion. Each sets `srcdoc` via `setAttribute` on the
+  parsed node (not a factory, not a TT sink). Under the harness lock's first
+  three layers all three still mint `window.length > 0`; only a fourth layer —
+  an output scan on `adoptNode`/`importNode`/`transformToFragment` — closes
+  them. Measured minting in Chromium 147, Firefox 148, WebKit 26.4; CI-gated
+  both ways (lock OFF → minted, lock ON → DENIED by the output scan).
+- **Resource hints are not reliably governed by `default-src 'none'` (findings
+  #15, napplet/evil#5).** The `resource-hints` row inserts prefetch,
+  dns-prefetch, preconnect and prerender; all four are unverifiable from inside
+  the frame (no violation/load/error event), so demo mode is honest `na`. The
+  **local-sink mode** observes the egress out-of-frame instead of assuming it:
+  pointed at a local HTTP sink on the real Chromium channel, `prerender` issues a
+  real HTTP GET carrying `Sec-Purpose: prefetch` even under the napplet's
+  `default-src 'none'` CSP — a browser non-conformance against CSP3 ED
+  (`w3c/webappsec-csp@e3461f7`, which places these under `default-src`). CI-gated
+  in `tests/evil-02.spec.mjs`; Playwright's default bundled build fires no hints,
+  so the gate uses `channel: 'chromium'` + `--enable-features=NetworkPrediction`
+  and degrades to a capability note where that channel is absent.
 
 ## Tier 1 — transport confusion (lazy runtimes)
 
@@ -218,7 +243,7 @@ Validated results:
 
 ### ✅ `evil-09-self-replacement` — frame self-replacement & identity inheritance
 
-Status: **built + validated** — 24/24 (`tests/evil-09.spec.mjs`)
+Status: **built + validated** — 34/34 (`tests/evil-09.spec.mjs`)
 
 The pre-#14 spec mapped `(dTag, artifactHash)` — and every grant — to the
 iframe **`Window`**. A Window survives same-frame navigation, and no sandbox
@@ -259,6 +284,23 @@ Validated results:
   namespace (`__evil09_poison__` for the next legit load to inherit) and
   exfiltrated the seed to the collector via the navigation URL — two egress
   channels, end to end.
+- **Pre-load self-navigation (findings #14, napplet/evil#5)**: a napplet whose
+  FIRST inline script self-navigates replaces its own document *before the
+  frame's first load event fires*. Replacement-watch keyed on a second load or a
+  second `napplet.hello` has no baseline — there was never a first load of the
+  verified document to diff against. Measured with a pre-load fixture: under
+  window binding the data: replacement's raw window-level `storage.get` is
+  ACCEPTED and served the verified seed with no teardown; under the port binding
+  it is `REVOKED` all the same, because post-handoff window-level NAP is
+  replacement evidence whatever the timing — so the port binding is the gate.
+  The target scheme (data:/blob:/https:) is governed only by the *embedding
+  page's* frame navigation policy, not the napplet's own CSP — and that is the
+  second gate: the harness `host frame-src 'none'` knob (`?hostframesrc=none`)
+  puts `frame-src 'none'` on the embedding page; the shell's srcdoc napplet still
+  loads and runs, but the pre-load self-navigation to data: or http(s): is
+  blocked (`HOST CSP BLOCKED frame-src`, no request reaches the target) even
+  under window binding. Without it the http(s) navigation lands. All paths
+  CI-gated (`tests/evil-09.spec.mjs`).
 
 | # | Attack | Spec clause |
 |---|--------|-------------|
@@ -337,6 +379,69 @@ Research notes for spec issues (to file upstream as the napplets validate them):
     egresses from there (kehto/web#381 — the gap kehto/web#393's prevention
     closed in Kehto). While no `webrtc` CSP directive exists, only prevention
     closes it: the #393 class — Trusted Types default policy + pinned
-    element factories + a fail-closed host byte scan. Validated by evil-02's
-    16-vector `webrtc-grandchild` battery; the harness `nested-context lock`
-    knob is the green gate (arms off / holds on, both CI-gated).
+    element factories + a fail-closed host byte scan (plus the XML-parser
+    output scan of findings #13). Validated by evil-02's `webrtc-grandchild`
+    battery; the harness `nested-context lock` knob is the green gate (arms
+    off / holds on, both CI-gated).
+13. ✅ **XML parsers are a nested-context sink past factory pins + Trusted
+    Types** — a frame element built by an XML parser never passes through
+    `createElement`/`createElementNS` or a TrustedHTML string sink, so a
+    prevention layer made of pinned element factories plus a Trusted Types
+    default policy (plus a static byte scan, which does not match runtime XML
+    strings) does not reach it. Three vectors mint a live `about:srcdoc`
+    grandchild past such a layer: `XSLTProcessor.transformToFragment` emitting
+    `xsl:element name="iframe"`, prefixed-namespace XHTML via
+    `DOMParser(…, 'application/xml')` + `adoptNode`, and DTD general-entity
+    expansion; each sets `srcdoc` with `setAttribute` on the parsed node. Only
+    an output scan on `adoptNode`/`importNode`/`transformToFragment` (a fourth
+    layer) closes them. This is a completeness gap in the #393-class prevention
+    (kehto/web#381 follow-up), not a browser non-conformance — no `webrtc` CSP
+    directive governs any of it. Measured minting in Chromium 147, Firefox 148,
+    WebKit 26.4; validated by evil-02's `webrtc-grandchild` battery (19 vectors)
+    with the harness `nested-context lock` the green gate (arms off / holds on,
+    both CI-gated). Supports treating `window.length > 0` as nested-context /
+    replacement evidence at the spec level.
+14. ✅ **Replacement-watch is blind to a pre-first-load self-navigation** — a
+    napplet whose first inline script navigates the frame to data:/blob:/https:
+    replaces its own document before the frame ever fires a first load event, so
+    a shell that detects replacement by counting loads or waiting for a second
+    `napplet.hello` has no baseline to diff against. Measured: under window
+    binding the data: replacement's raw window-level `storage.get` is ACCEPTED
+    and served the verified napplet's seed with no teardown; under the post-#14
+    port binding it is `REVOKED` all the same, because treating any post-handoff
+    window-level NAP as replacement evidence is timing-independent — that, not
+    load-counting, is one control that holds. The other is the *embedding
+    page's* frame navigation policy, which alone governs the target scheme: an
+    embedding-page `frame-src 'none'` leaves the shell's srcdoc napplet loading
+    normally but blocks its pre-load self-navigation to data: or http(s):
+    (measured in Chromium here; Chromium 147, Firefox 148.0.2, WebKit 26.4 per
+    the independent re-measurement). Validated by evil-09's pre-load fixture
+    (window serves / port revokes / host `frame-src 'none'` blocks, all
+    CI-gated);
+    repro in the evil-09 kit. Supports the NIP-5D proposal that replacement
+    evidence cannot be keyed on the first `load`. (napplet/evil#5)
+15. ✅ **Resource hints are not reliably governed by `default-src 'none'`** — a
+    srcdoc napplet under the spec baseline can still reach the network through
+    `<link rel>` resource hints, which no fetch directive observes and which
+    CSP3 ED (`w3c/webappsec-csp@e3461f7`) places under `default-src` — so a
+    browser that lets them through under `default-src 'none'` is non-conformant.
+    From inside the frame the loads are unverifiable (no violation/load/error
+    event); the local-sink mode observes them out-of-frame. Measured per engine
+    (Kehto Playwright probes; prerender reconfirmed on the Chromium channel in
+    `tests/evil-02.spec.mjs`):
+
+    | hint | Chromium 147 | Firefox 148 | WebKit 26.4 |
+    |------|--------------|-------------|-------------|
+    | `rel=prerender` | HTTP GET, `Sec-Purpose: prefetch` | — | — |
+    | `rel=preconnect` | DNS + TCP (network prediction on) | — | TCP |
+    | `rel=dns-prefetch` | DNS (network prediction on) | DNS (DNS prefetch enabled) | — |
+    | `rel=prefetch` | governed by `default-src` here (CSP violation) | — | — |
+
+    A dash is "not observed in that engine/config", not "closed" — these are
+    prediction/flag-gated and build-dependent, which is itself the point: the
+    napplet CSP is not the control. Playwright's default context disables network
+    prediction, so preconnect/dns-prefetch need the real browser channel with
+    prediction enabled; prerender's HTTP GET fires regardless and is the CI
+    anchor. Closing this needs an embedding-page / Permissions-Policy control or
+    a CSP directive the browser actually enforces for hints — a spec gap for the
+    NIP-5D CSP advisory (C/D/E). (napplet/evil#5)

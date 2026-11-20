@@ -24,8 +24,56 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   check('spec: eval canary held (CSP enforced)', st['eval-csp'] === 'blocked');
   check('spec: WebRTC DATA CHANNEL ARMS — no CSP directive covers it (spec gap)', st['webrtc'] === 'armed', st['webrtc']);
   check('spec: WebRTC GRANDCHILD ARMS — fresh nested realm, no CSP directive reaches it (kehto/web#381)', st['webrtc-grandchild'] === 'armed', st['webrtc-grandchild']);
-  check('spec: prefetch hint unverifiable (na)', st['prefetch-hint'] === 'na');
+  check('spec: resource hints unverifiable from inside the frame (na)', st['resource-hints'] === 'na', st['resource-hints']);
+  const hintEv = await evidence(f, 'resource-hints');
+  check('spec: all four hint types inserted (prefetch/dns-prefetch/preconnect/prerender)', /prefetch, dns-prefetch, preconnect, prerender/.test(hintEv), hintEv.slice(0, 120));
+  // finding 13: the XML-parser sinks mint fresh contexts too, with no factory
+  // pin or TT layer engaged (spec preset has no lock) — all three minted.
+  const gcEv = await evidence(f, 'webrtc-grandchild');
+  check('spec: XSLT transformToFragment mints a nested context (finding 13)', /XSLT transformToFragment: minted/.test(gcEv), gcEv.slice(-260));
+  check('spec: XML-namespace DOMParser+adopt mints a nested context (finding 13)', /XHTML DOMParser\+adopt: minted/.test(gcEv), gcEv.slice(-200));
+  check('spec: DTD-entity XML mints a nested context (finding 13)', /DTD-entity XML: minted/.test(gcEv), gcEv.slice(-160));
   await page.close();
+}
+
+// Local-sink mode (finding 15, napplet/evil#5, spec C/D/E): resource hints are
+// not reliably governed by default-src 'none'. Observe egress at a local HTTP
+// sink rather than assume it. prerender issues a real HTTP GET (Sec-Purpose:
+// prefetch) even under the napplet CSP — a browser non-conformance per CSP3 ED.
+// Playwright's DEFAULT bundled build + context fires no hints, so this runs on
+// the real Chromium channel with network prediction; where that channel is not
+// installed the check degrades to a capability note and the per-engine evidence
+// lives in ROADMAP finding 15.
+{
+  const { createServer } = await import('node:http');
+  const hits = [];
+  const sink = createServer((req, res) => { hits.push({ url: req.url, purpose: req.headers['sec-purpose'] || '-' }); res.writeHead(200, { 'content-type': 'text/html' }); res.end('ok'); });
+  await new Promise((r) => sink.listen(0, '127.0.0.1', r));
+  const host = createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<!doctype html><body>'); });
+  await new Promise((r) => host.listen(0, '127.0.0.1', r));
+  const SINK = `http://127.0.0.1:${sink.address().port}`;
+  const HOST = `http://127.0.0.1:${host.address().port}/`;
+  // the exact spec-baseline CSP the harness injects (default-src 'none')
+  const CSP = "default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; frame-src 'none'";
+  const nap = '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="' + CSP.replace(/"/g, '&quot;') + '"></head><body><scr' + 'ipt>'
+    + 'for (const rel of ["prefetch","dns-prefetch","preconnect","prerender"]) { const l = document.createElement("link"); l.rel = rel; l.href = "' + SINK + '/" + rel; document.head.appendChild(l); }'
+    + '</scr' + 'ipt></body></html>';
+  let chan = null;
+  try { chan = await chromium.launch({ channel: 'chromium', args: ['--enable-features=NetworkPrediction'] }); } catch (_) { chan = null; }
+  if (chan) {
+    const p = await chan.newPage();
+    await p.goto(HOST);
+    await p.evaluate((html) => { const fr = document.createElement('iframe'); fr.sandbox.add('allow-scripts'); fr.srcdoc = html; document.body.append(fr); }, nap);
+    await p.waitForTimeout(2800);
+    const prerender = hits.find((h) => h.url.includes('/prerender'));
+    check('local-sink: prerender OBSERVED as a real HTTP GET under default-src \'none\' (Chromium ' + chan.version().split('.')[0] + ' non-conformance, finding 15)', !!prerender, JSON.stringify(hits));
+    check('local-sink: prerender request carries Sec-Purpose: prefetch', !!prerender && /prefetch/.test(prerender.purpose), prerender ? prerender.purpose : 'no prerender hit');
+    await chan.close();
+  } else {
+    check('local-sink: real Chromium channel unavailable — prerender/preconnect/dns-prefetch egress recorded in ROADMAP finding 15 (per-engine table)', true, 'channel chromium not installed');
+  }
+  sink.close();
+  host.close();
 }
 
 // no CSP: egress channels open
@@ -51,7 +99,12 @@ const browser = await chromium.launch({ viewport: { width: 1600, height: 1200 } 
   const len = await f.evaluate(() => window.length);
   check('lock: window.length 0 across the whole bypass battery', len === 0, String(len));
   const ev = await evidence(f, 'webrtc-grandchild');
-  check('lock: evidence records the per-vector denials (TT sinks + factory pins)', /DENIED/.test(ev) && /16 battery vectors/.test(ev), ev.slice(0, 220));
+  check('lock: evidence records the per-vector denials (TT sinks + factory pins + XML scan)', /DENIED/.test(ev) && /19 battery vectors/.test(ev), ev.slice(0, 220));
+  // finding 13: layer 4 (adoptNode/transformToFragment output scan) closes the
+  // XML-parser sinks that factory pins + TT do not reach.
+  check('lock: XSLT transformToFragment DENIED by the output scan (finding 13)', /XSLT transformToFragment: DENIED \(TypeError: nested browsing contexts are locked: xslt frame node/.test(ev), ev.slice(-280));
+  check('lock: XML-namespace DOMParser+adopt DENIED by the output scan (finding 13)', /XHTML DOMParser\+adopt: DENIED \(TypeError: nested browsing contexts are locked: xml-parser frame node/.test(ev), ev.slice(-200));
+  check('lock: DTD-entity XML DENIED by the output scan (finding 13)', /DTD-entity XML: DENIED \(TypeError: nested browsing contexts are locked: xml-parser frame node/.test(ev), ev.slice(-140));
   const tt = await f.evaluate(() => String(window.__evilLockTT));
   check('lock: TT default policy registered in the napplet realm', tt === 'default policy registered', tt);
   check('lock: top-realm webrtc unaffected (the lock prevents contexts, it does not neuter RTC)', st['webrtc'] === 'armed', st['webrtc']);

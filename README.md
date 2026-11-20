@@ -53,7 +53,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 106 automated checks against real
+**All nine rungs are built and validated** — 125 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -92,12 +92,20 @@ every knob re-arms a different subset of the attacks:
   rejected — closes innerHTML/outerHTML/DOMParser/createContextualFragment/
   setHTMLUnsafe/srcdoc/document.write), pinned element factories
   (createElement/createElementNS/DOMImplementation.createDocument
-  non-configurable, frame tag names denied), and a fail-closed byte scan of
-  the verified artifact before load. Off — the battery arms (fresh grandchild
-  realms report a live RTCPeerConnection); on — zero nested contexts minted,
-  `window.length` stays 0. `tests/evil-02.spec.mjs` gates both paths.
+  non-configurable, frame tag names denied), a fail-closed byte scan of
+  the verified artifact before load, and an adoptNode/importNode/
+  transformToFragment output scan for the XML-parser sinks a factory-pin + TT
+  layer does not reach (XSLT, XML-namespace DOMParser, DTD entities — ROADMAP
+  finding 13). Off — the battery arms (fresh grandchild realms report a live
+  RTCPeerConnection); on — zero nested contexts minted, `window.length` stays
+  0 across all 19 vectors. `tests/evil-02.spec.mjs` gates both paths.
 - **shell `window.nostr`** — a fake NIP-07 extension, arms ambient-signing probes.
 - **sibling iframe** — arms `parent.length` enumeration.
+- **host frame-src 'none'** — puts `frame-src 'none'` on the embedding page
+  (reloads the harness with `?hostframesrc=none`). The shell's srcdoc napplet
+  still loads; a napplet navigating its own frame to data:/http(s): — even
+  before its first load, where replacement-watch is blind — is blocked. The
+  embedding-page green gate for evil-09's pre-load self-navigation (finding 14).
 - **fake NAP runtime** — injects a `window.napplet.storage` domain (pre-script,
   outside the hashed artifact bytes, like a real runtime) with a selectable
   **namespace policy**: `by-(dTag+hash)` (spec-safe), `by-dTag` (version
@@ -127,7 +135,7 @@ harness/
   index.html                          # configurable victim shell
   replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-9].spec.mjs   # 106 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 125 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 
