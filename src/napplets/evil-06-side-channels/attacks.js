@@ -142,6 +142,7 @@ const ATTACKS = [
     name: 'shell scheduler RTT probe',
     target: 'postMessage echo round-trip',
     severity: 'high',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     harm: 'The parent\'s message round-trip is measurable from inside — shell event-loop scheduling (and, in non-site-isolated runtimes, renderer contention) leaks through. Recon channel for the same-process gadgets (see evil-08).',
     async demo() {
       const rtts = await pingRTT(6);

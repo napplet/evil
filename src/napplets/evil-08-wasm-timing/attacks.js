@@ -74,6 +74,7 @@ const ATTACKS = [
     name: 'same-main-thread contention',
     target: 'opaque-origin srcdoc frames are not site-isolated',
     severity: 'critical',
+    windowLevel: true, // posts window-level to the parent (napplet/evil#3: runs last)
     destructive: true,
     harm: 'A srcdoc napplet shares the renderer MAIN THREAD with the shell (opaque origins are not site-isolated). A busy loop here freezes the shell\'s own handlers — denial-of-service on the trusted side from inside the sandbox, plus shared-scheduler timing leaks.',
     evilBrief: 'Runs a REAL busy loop (~300ms demo / ~1500ms armed) that freezes this renderer main thread — the SHELL UI AND HANDLERS STALL with it (same thread). Measures and logs the shell-side starvation via ping echo, then exfiltrates the contention model to the collector. This payload runs LAST because it degrades the log rendering too.',

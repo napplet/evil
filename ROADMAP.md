@@ -2,7 +2,7 @@
 
 Ordered from lowest hanging fruit (misconfigured / lazy runtimes) to the most nuanced
 (assaults on well-hardened runtimes, and on the NIP-5D specification itself).
-**All nine rungs are built and validated** — 110 automated checks against real
+**All nine rungs are built and validated** — 132 automated checks against real
 Chromium (`tests/`). Each rung names the spec clause it attacks, what arms it,
 and what validation proved.
 
@@ -110,7 +110,7 @@ Validated results:
 
 ### ✅ `evil-03-transport-forge` — envelope forging & reply injection
 
-Status: **built + validated** — 8/8 (`tests/evil-03.spec.mjs`)
+Status: **built + validated** — 19/19 (`tests/evil-03.spec.mjs`)
 
 postMessage `'*'` is required (opaque origins have no origin to target), so the
 **only** sender identity is `MessageEvent.source`. Attacks: forged reply
@@ -130,6 +130,11 @@ Validated results:
   log shows `DROPPED`). NIP-5D's "messages from unknown sources MUST be
   silently dropped" is load-bearing here, and the CSP advisory's `frame-src
   'none'` is *not* the control it looks like.
+- **Port-bound shells (napplet/evil#3)**: every probe except
+  `shell-broadcast` posts window-level, so they are `windowLevel` rows and the
+  sweep runs them last. Under `binding: port` the harvest finishes first, then
+  the first window-level `storage.get` gets the frame REVOKED and removed;
+  `evil-window-level=skip` reports them `na` with no revocation.
 
 ## Tier 2 — manifest & identity confusion
 
@@ -177,7 +182,7 @@ NIP-5D explicitly does *not* protect against side-channel attacks
 
 ### ✅ `evil-06-side-channels` — oracles on shell mediation
 
-Status: **built + validated** — 5/5 (`tests/evil-06.spec.mjs`)
+Status: **built + validated** — 16/16 (`tests/evil-06.spec.mjs`)
 
 Validated results:
 
@@ -190,6 +195,11 @@ Validated results:
   measurable from inside — recon for the same-process gadgets (see evil-08).
 - Without an injected runtime the oracles close (`na`) — mediation is the
   leak surface.
+- **Port-bound shells (napplet/evil#3)**: `shell-rtt` is the only
+  window-level row (`evil.ping`), so it runs last; under `binding: port` the
+  storage timing oracle and the error taxonomy complete over the port before
+  the shell revokes on the first ping. `evil-window-level=skip` keeps the frame
+  bound and reports `shell-rtt` as `na`.
 
 ### ✅ `evil-07-fingerprint` — identification that survives compliance
 

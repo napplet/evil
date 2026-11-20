@@ -53,7 +53,7 @@ quiet. They demonstrate harm; they don't optimize for it.
 | 2 | Manifest & identity confusion | `evil-04` manifest confusion, `evil-05` Nostr-level substitution |
 | 3 | Side channels & spec loopholes — hardened runtimes | `evil-06`…`evil-09` |
 
-**All nine rungs are built and validated** — 110 automated checks against real
+**All nine rungs are built and validated** — 132 automated checks against real
 Chromium (`tests/`). One napplet per rung, lowest fruit first. Per-rung status
 and validated findings live in [ROADMAP.md](ROADMAP.md).
 
@@ -80,10 +80,15 @@ every knob re-arms a different subset of the attacks:
   which arms the evil-09 self-replacement inheritance) vs `port` (post-#14:
   the injected bootstrap hands a `MessageChannel` port over once via
   `napplet.hello`; the shell revokes identity, grants, and the iframe on a
-  second hello, a second load, post-handoff window-level NAP, or the port
-  closing — the green gate evil-09 must not survive). Port mode is strict:
+  second hello, a second load, any post-handoff window-level message
+  (`storage.*`, `relay.*`, the harness's own `evil.*` channel — logged as
+  `REVOKED … window-level NAP message after napplet.hello handoff`), or the
+  port closing — the green gate evil-09 must not survive). Port mode is strict:
   legacy napplets that speak window-level NAP get dropped and the frame torn
   down, exactly as the fixed spec demands.
+- **run parameters** — the `evil-window-level` select injects
+  `window.__EVIL_PARAMS__` as a pre-script (outside the hashed bytes, even with
+  the storage runtime off); see [Run parameters](#run-parameters).
 - **CSP meta** — on/off. Off arms every evil-02 egress channel; on holds them
   (except WebRTC — and the grandchild-frame fresh realm — the spec gaps, see ROADMAP).
 - **nested-context lock** — on/off. The kehto/web#393-style prevention gate for
@@ -111,10 +116,37 @@ every knob re-arms a different subset of the attacks:
 - **launcher** — `safe` (textContent) vs `unsafe` (innerHTML) manifest-metadata
   render — arms the evil-04 shell-origin XSS end to end.
 
+### Run parameters
+
+Napplets read run parameters through `evilParam(name)` in the shared chrome.
+The first source that names the key wins:
+
+1. `window.__EVIL_PARAMS__` — an object a host injects pre-script (srcdoc-safe;
+   what the harness uses)
+2. `<meta name="evil-params" content="k=v&k2=v2">` in the napplet document
+3. the napplet document's own `?query` or `#hash` (URL-served napplets)
+4. `document.baseURI` `?query` or `#hash` (a srcdoc frame inherits the embedding
+   page's URL; best-effort, a host `<base href>` hides it)
+
+Missing → each probe uses its documented default.
+
+- **`evil-window-level`** — rows marked `windowLevel` (chip: *window-level*)
+  post a message to the parent Window instead of riding the injected
+  `window.napplet` API or the `napplet.hello` port. Under NIP-5D a port-bound
+  shell may treat that as replacement evidence and revoke (the harness removes
+  the frame), which would end the sweep early. `last` (default; unknown values
+  count as `last`): the auto sweep runs every other row first, then the
+  window-level rows, keeping declared order inside each group. `skip`: the
+  sweep reports window-level rows as `na` (`skipped: window-level probe …`)
+  and never sends them. The per-row probe button always runs the row.
+  Window-level rows: evil-03 `declared-identity`, `forged-reply`,
+  `sequential-ids`, `unknown-source`; evil-04 `launcher-xss`; evil-06
+  `shell-rtt`; evil-08 `same-thread`.
+
 It also seeds victim canaries (`nsec` marker in `localStorage`, inherited v1
   secrets per namespace policy, and a per-load `__evil09_victim__` grant seed),
-  echoes `evil.ping` with a shell-side wall clock (so frames can measure shell
-  starvation), logs every ACCEPTED/DROPPED/REVOKED message, and dumps the
+  echoes `evil.ping` with a shell-side wall clock under window binding (so
+  frames can measure shell starvation; port binding revokes on it instead), logs every ACCEPTED/DROPPED/REVOKED message, and dumps the
   runtime store.
 
 ## Repo layout
@@ -130,7 +162,7 @@ harness/
   index.html                          # configurable victim shell
   replace-target.html                 # evil-09 network-replacement fixture (attacker-page stand-in)
 tests/
-  _helper.mjs + evil-0[1-9].spec.mjs   # 110 Playwright checks vs real Chromium
+  _helper.mjs + evil-0[1-9].spec.mjs   # 132 Playwright checks vs real Chromium
 ROADMAP.md                            # attack ladder + validated NIP-5D spec findings
 ```
 
