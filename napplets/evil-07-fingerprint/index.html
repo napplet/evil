@@ -126,6 +126,7 @@
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
   .chip.sev-info { color: var(--muted); }
+  .chip.window-level { color: var(--muted); border-style: dashed; }
   .evidence {
     color: var(--muted);
     font-size: 11px;
@@ -660,12 +661,14 @@ const ATTACKS = [
       const div = document.createElement('div');
       div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
+      if (a.windowLevel) div.dataset.windowLevel = '1';
       div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
       div.innerHTML =
         '<div class="attack-head">' +
           statusChip(r.status) +
           '<span class="attack-name">' + esc(a.name) + '</span>' +
           sevChip(a.severity) +
+          (a.windowLevel ? '<span class="chip window-level" title="posts a window-level message to the parent: runs last in the sweep (a port-bound NIP-5D shell may revoke on it)">window-level</span>' : '') +
           '<span class="spacer"></span>' +
           '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
         '</div>' +
@@ -727,8 +730,26 @@ const ATTACKS = [
     render();
     updateReport();
   }
+  /* window-level rows (windowLevel: true) post a message to the parent
+     Window instead of riding the injected API / napplet.hello port. A
+     port-bound NIP-5D shell may treat that as replacement evidence and revoke
+     (tearing this frame down), so the sweep runs them LAST, or not at all
+     with evil-window-level=skip (napplet/evil#3). Manual probes still run. */
+  function windowLevelMode() {
+    const v = String(evilParam('evil-window-level') || '').trim().toLowerCase();
+    return v === 'skip' ? 'skip' : 'last';
+  }
   async function runAllDemos() {
-    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
+    const auto = ATTACKS.filter((a) => a.autoRun !== false);
+    const late = auto.filter((a) => a.windowLevel);
+    if (windowLevelMode() === 'skip') {
+      for (const a of late) state.results[a.id] = na('skipped: window-level probe (evil-window-level=skip) — a port-bound NIP-5D shell may revoke on it; use the probe button to run it');
+      render();
+      updateReport();
+    }
+    for (const a of auto) if (!a.windowLevel) await runDemo(a.id);
+    if (windowLevelMode() === 'skip') return;
+    for (const a of late) await runDemo(a.id);
   }
 
   /* ---------- VERY EVIL ---------- */

